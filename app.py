@@ -14,7 +14,7 @@ except:
     pass
 
 if hasattr(st, 'secrets'):
-    for key in ['SUPABASE_URL', 'GEMINI_API_KEY']:
+    for key in ['SUPABASE_HOST', 'SUPABASE_DB', 'SUPABASE_PORT', 'SUPABASE_USER', 'SUPABASE_PASSWORD', 'GEMINI_API_KEY']:
         val = st.secrets.get(key, os.getenv(key, ''))
         if val:
             os.environ[key] = val
@@ -26,7 +26,13 @@ genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
 gemini_model = genai.GenerativeModel('gemini-2.5-flash')
 
 def get_db_connection():
-    return psycopg2.connect(os.getenv('SUPABASE_URL'))
+    return psycopg2.connect(
+        host=os.getenv('SUPABASE_HOST'),
+        database=os.getenv('SUPABASE_DB'),
+        port=os.getenv('SUPABASE_PORT'),
+        user=os.getenv('SUPABASE_USER'),
+        password=os.getenv('SUPABASE_PASSWORD')
+    )
 
 def get_chennai_weather():
     try:

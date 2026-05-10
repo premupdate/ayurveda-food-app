@@ -2,3 +2,4 @@ streamlit
 snowflake-connector-python
 anthropic
 python-dotenv
+requests

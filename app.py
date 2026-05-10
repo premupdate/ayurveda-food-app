@@ -127,7 +127,7 @@ Return ONLY valid JSON, no markdown, no code blocks:
 
     try:
         message = client.messages.create(
-            model="claude-opus-4-20250514",
+            model="claude-sonnet-4-20250514",
             max_tokens=500,
             messages=[{"role": "user", "content": prompt}]
         )
@@ -152,7 +152,7 @@ Matching herbs from database:
 Return ONLY valid JSON, no markdown:
 {{"breakfast": {{"name": "Recipe", "ingredients": "List", "prep_time": "15 min", "medicinal_herbs": "Herbs to add", "herb_preparation": "How to prepare herbs", "why_this_dish": "Why it helps", "nutritional_benefits": "Benefits", "dosha_fit": "Balance"}}, "lunch": {{"name": "Recipe", "ingredients": "List", "prep_time": "20 min", "medicinal_herbs": "Herbs", "herb_preparation": "Prep", "why_this_dish": "Why", "nutritional_benefits": "Benefits", "dosha_fit": "Balance"}}, "dinner": {{"name": "Recipe", "ingredients": "List", "prep_time": "15 min", "medicinal_herbs": "Herbs", "herb_preparation": "Prep", "why_this_dish": "Why", "nutritional_benefits": "Benefits", "dosha_fit": "Balance"}}, "shopping_list": [{{"item": "Item", "quantity": "100", "unit": "g", "price_estimate": "10"}}], "total_cost": "140", "wellness_notes": "Benefits including weather-adapted advice"}}"""
     try:
-        message = client.messages.create(model="claude-opus-4-20250514", max_tokens=1500, messages=[{"role": "user", "content": prompt}])
+        message = client.messages.create(model="claude-sonnet-4-20250514", max_tokens=1500, messages=[{"role": "user", "content": prompt}])
         response_text = message.content[0].text.strip()
         if response_text.startswith("```"):
             response_text = response_text.split("```")[1]
@@ -173,7 +173,7 @@ Kid-safe herbs from database:
 Return ONLY valid JSON:
 {{"breakfast": {{"name": "Dish", "ingredients": "List", "health_benefits": "Benefits", "medicinal_herbs": "Herbs", "herb_preparation": "Prep for kids", "why_better_than_junk": "Why better", "taste_profile": "Taste", "prep_time": "15 min", "portion_size": "Amount"}}, "lunch": {{"name": "Dish", "ingredients": "List", "health_benefits": "Benefits", "medicinal_herbs": "Herbs", "herb_preparation": "Prep", "why_better_than_junk": "Why", "taste_profile": "Taste", "prep_time": "20 min", "portion_size": "Amount"}}, "dinner": {{"name": "Dish", "ingredients": "List", "health_benefits": "Benefits", "medicinal_herbs": "Herbs", "herb_preparation": "Prep", "why_better_than_junk": "Why", "taste_profile": "Taste", "prep_time": "15 min", "portion_size": "Amount"}}, "parental_guidance": "Tips", "nutritional_summary": "Benefits"}}"""
     try:
-        message = client.messages.create(model="claude-opus-4-20250514", max_tokens=1500, messages=[{"role": "user", "content": prompt}])
+        message = client.messages.create(model="claude-sonnet-4-20250514", max_tokens=1500, messages=[{"role": "user", "content": prompt}])
         response_text = message.content[0].text.strip()
         if response_text.startswith("```"):
             response_text = response_text.split("```")[1]

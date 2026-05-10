@@ -3,11 +3,19 @@ import snowflake.connector
 import os
 from dotenv import load_dotenv
 import json
+import requests
 from anthropic import Anthropic
 
 load_dotenv()
 
-st.set_page_config(page_title="Tamil Nadu Ayurvedic Food + Herbs Recommendation", layout="wide")
+# Support both local .env and Streamlit Cloud secrets
+if hasattr(st, 'secrets'):
+    for key in ['SNOWFLAKE_ACCOUNT', 'SNOWFLAKE_USER', 'SNOWFLAKE_PASSWORD', 'SNOWFLAKE_WAREHOUSE', 'SNOWFLAKE_DATABASE', 'SNOWFLAKE_SCHEMA', 'ANTHROPIC_API_KEY']:
+        val = st.secrets.get(key, os.getenv(key, ''))
+        if val:
+            os.environ[key] = val
+
+st.set_page_config(page_title="Tamil Ayurvedic Food + Herbs + Weather", layout="wide")
 
 client = Anthropic()
 
@@ -21,8 +29,24 @@ def get_snowflake_connection():
         schema=os.getenv('SNOWFLAKE_SCHEMA')
     )
 
+def get_chennai_weather():
+    """Get live Chennai weather - no API key needed"""
+    try:
+        url = "https://wttr.in/Chennai?format=j1"
+        response = requests.get(url, timeout=5)
+        data = response.json()
+        current = data['current_condition'][0]
+        return {
+            "temp": current['temp_C'],
+            "humidity": current['humidity'],
+            "desc": current['weatherDesc'][0]['value'],
+            "feels_like": current['FeelsLikeC'],
+            "wind": current['windspeedKmph']
+        }
+    except:
+        return {"temp": "32", "humidity": "65", "desc": "Partly Cloudy", "feels_like": "35", "wind": "15"}
+
 def get_herbs_for_dosha(dosha_type):
-    """Fetch matching herbs from MEDICINAL_HERBS table"""
     try:
         conn = get_snowflake_connection()
         cursor = conn.cursor()
@@ -39,21 +63,18 @@ def get_herbs_for_dosha(dosha_type):
         rows = cursor.fetchall()
         cursor.close()
         conn.close()
-        
         herbs = []
         for row in rows:
             herbs.append({
                 "english": row[0], "tamil": row[1], "part": row[2],
                 "uses": row[3], "diseases": row[4], "preparation": row[5],
-                "season": row[6], "safe_kids": row[7], "min_age": row[8],
-                "score": row[9]
+                "season": row[6], "safe_kids": row[7], "min_age": row[8], "score": row[9]
             })
         return herbs
-    except Exception as e:
+    except:
         return []
 
 def get_all_herbs():
-    """Fetch all herbs from MEDICINAL_HERBS table"""
     try:
         conn = get_snowflake_connection()
         cursor = conn.cursor()
@@ -62,8 +83,7 @@ def get_all_herbs():
                    VATA_EFFECT, PITTA_EFFECT, KAPHA_EFFECT,
                    DISEASES_TREATED, PREPARATION_METHODS, SEASONAL_AVAILABILITY,
                    SAFE_FOR_KIDS, MIN_AGE_YEARS, DATA_CONFIDENCE_SCORE
-            FROM MEDICINAL_HERBS
-            ORDER BY DATA_CONFIDENCE_SCORE DESC
+            FROM MEDICINAL_HERBS ORDER BY DATA_CONFIDENCE_SCORE DESC
         """)
         rows = cursor.fetchall()
         cursor.close()
@@ -72,30 +92,43 @@ def get_all_herbs():
     except:
         return []
 
-def classify_dosha_with_cortex(body_condition):
+def get_all_recipes():
+    try:
+        conn = get_snowflake_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT RECIPE_NAME, DOSHA_SUITABILITY, SEASONAL_BEST FROM RECIPES ORDER BY RECIPE_ID")
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        return rows
+    except:
+        return []
+
+def classify_dosha_with_cortex(body_condition, weather):
     prompt = f"""You are an Ayurvedic health expert specializing in Tamil Nadu Siddha medicine.
 
 User's Body Condition:
 - Cold intensity: {body_condition['cold']}/5
-- Cough type: {body_condition['cough']}
-- Cough severity: {body_condition['cough_severity']}/5
-- Pain locations: {body_condition['pain_locations']}
-- Pain severity: {body_condition['pain_severity']}/5
+- Cough type: {body_condition['cough']}, severity: {body_condition['cough_severity']}/5
+- Pain locations: {body_condition['pain_locations']}, severity: {body_condition['pain_severity']}/5
 - Pimple count: {body_condition['pimple_count']}
-- Sweating level: {body_condition['sweating']}
-- Sputum color: {body_condition['sputum']}
-- Urine color: {body_condition['urine']}
-- Energy level: {body_condition['energy']}/10
-- Digestion quality: {body_condition['digestion']}
+- Sweating: {body_condition['sweating']}, Sputum: {body_condition['sputum']}, Urine: {body_condition['urine']}
+- Energy: {body_condition['energy']}/10, Digestion: {body_condition['digestion']}
 
-Classify dosha. Return ONLY valid JSON, no markdown, no code blocks:
+Current Weather in Chennai:
+- Temperature: {weather['temp']}°C (Feels like: {weather['feels_like']}°C)
+- Humidity: {weather['humidity']}%, Wind: {weather['wind']} km/h
+- Condition: {weather['desc']}
 
-{{"primary_dosha": "Vata or Pitta or Kapha", "dosha_percent": 75, "secondary_dosha": "Pitta", "secondary_percent": 25, "confidence": 0.92, "summary": "Brief clinical summary"}}"""
+Consider BOTH body symptoms AND current weather for dosha classification.
+Return ONLY valid JSON, no markdown, no code blocks:
+
+{{"primary_dosha": "Vata or Pitta or Kapha", "dosha_percent": 75, "secondary_dosha": "Pitta", "secondary_percent": 25, "confidence": 0.92, "summary": "Brief summary including weather impact", "weather_impact": "How today weather affects dosha"}}"""
 
     try:
         message = client.messages.create(
             model="claude-opus-4-20250514",
-            max_tokens=400,
+            max_tokens=500,
             messages=[{"role": "user", "content": prompt}]
         )
         response_text = message.content[0].text.strip()
@@ -103,427 +136,342 @@ Classify dosha. Return ONLY valid JSON, no markdown, no code blocks:
             response_text = response_text.split("```")[1]
             if response_text.startswith("json"):
                 response_text = response_text[4:]
-        response_text = response_text.strip()
-        return json.loads(response_text)
+        return json.loads(response_text.strip())
     except:
-        return {"primary_dosha": "Vata", "dosha_percent": 70, "secondary_dosha": "Pitta", "secondary_percent": 30, "confidence": 0.5, "summary": "Default classification"}
+        return {"primary_dosha": "Vata", "dosha_percent": 70, "secondary_dosha": "Pitta", "secondary_percent": 30, "confidence": 0.5, "summary": "Default", "weather_impact": "Unable to assess"}
 
-def generate_recipes_with_cortex(dosha_info, season, user_energy, herbs_list):
-    herbs_text = ""
-    for h in herbs_list:
-        herbs_text += f"- {h['english']} ({h['tamil']}): {h['uses']} | Preparation: {h['preparation']} | Season: {h['season']}\n"
+def generate_recipes_with_cortex(dosha_info, season, energy, herbs_list, weather):
+    herbs_text = "\n".join([f"- {h['english']} ({h['tamil']}): {h['uses']} | Prep: {h['preparation']}" for h in herbs_list[:8]])
+    prompt = f"""Tamil Nadu Ayurvedic chef. Generate herb-enhanced recipes.
+Dosha: {dosha_info['primary_dosha']} ({dosha_info['dosha_percent']}%), Season: {season}, Energy: {energy}/10
+Weather: {weather['temp']}°C, Humidity {weather['humidity']}%, {weather['desc']}
 
-    prompt = f"""You are a Tamil Nadu Ayurvedic chef with expertise in Siddha medicinal herbs.
-
-User Profile:
-- Primary Dosha: {dosha_info['primary_dosha']} ({dosha_info['dosha_percent']}%)
-- Season: {season}
-- Energy: {user_energy}/10
-
-Available Tamil Dishes: Vaazhapoo Sambar, Manathakkali Keerai Sambar, Kathirikai Murungakkai Sambar, Vegetable Biryani with Pudhina, Toor Dall Tadka, Potato Fry, Sundakkai Kadaisal, Murungakkai Poriyal, Cauliflower Pakora, Vendakkai Poriyal
-
-MEDICINAL HERBS FROM DATABASE (matching user's dosha):
+Matching herbs from database:
 {herbs_text}
 
-Generate 3 recipes that INCLUDE specific medicinal herbs from the database above. Return ONLY valid JSON, no markdown, no code blocks:
-
-{{"breakfast": {{"name": "Recipe name", "ingredients": "Ingredients list", "prep_time": "15 minutes", "medicinal_herbs": "Which herbs from database to add and why", "herb_preparation": "How to prepare the herb for this dish", "why_this_dish": "Why it helps their dosha", "nutritional_benefits": "Key nutrients", "dosha_fit": "How it balances dosha"}}, "lunch": {{"name": "Recipe name", "ingredients": "Ingredients list", "prep_time": "20 minutes", "medicinal_herbs": "Herbs to add", "herb_preparation": "How to prepare herbs", "why_this_dish": "Why it helps", "nutritional_benefits": "Key nutrients", "dosha_fit": "Balance"}}, "dinner": {{"name": "Recipe name", "ingredients": "Ingredients list", "prep_time": "15 minutes", "medicinal_herbs": "Herbs to add", "herb_preparation": "How to prepare herbs", "why_this_dish": "Why it helps", "nutritional_benefits": "Key nutrients", "dosha_fit": "Balance"}}, "shopping_list": [{{"item": "Ingredient", "quantity": "100", "unit": "g", "price_estimate": "10"}}], "total_cost": "140", "wellness_notes": "Overall benefits including herb therapy"}}"""
-
+Return ONLY valid JSON, no markdown:
+{{"breakfast": {{"name": "Recipe", "ingredients": "List", "prep_time": "15 min", "medicinal_herbs": "Herbs to add", "herb_preparation": "How to prepare herbs", "why_this_dish": "Why it helps", "nutritional_benefits": "Benefits", "dosha_fit": "Balance"}}, "lunch": {{"name": "Recipe", "ingredients": "List", "prep_time": "20 min", "medicinal_herbs": "Herbs", "herb_preparation": "Prep", "why_this_dish": "Why", "nutritional_benefits": "Benefits", "dosha_fit": "Balance"}}, "dinner": {{"name": "Recipe", "ingredients": "List", "prep_time": "15 min", "medicinal_herbs": "Herbs", "herb_preparation": "Prep", "why_this_dish": "Why", "nutritional_benefits": "Benefits", "dosha_fit": "Balance"}}, "shopping_list": [{{"item": "Item", "quantity": "100", "unit": "g", "price_estimate": "10"}}], "total_cost": "140", "wellness_notes": "Benefits including weather-adapted advice"}}"""
     try:
-        message = client.messages.create(
-            model="claude-opus-4-20250514",
-            max_tokens=1500,
-            messages=[{"role": "user", "content": prompt}]
-        )
+        message = client.messages.create(model="claude-opus-4-20250514", max_tokens=1500, messages=[{"role": "user", "content": prompt}])
         response_text = message.content[0].text.strip()
         if response_text.startswith("```"):
             response_text = response_text.split("```")[1]
             if response_text.startswith("json"):
                 response_text = response_text[4:]
-        response_text = response_text.strip()
-        return json.loads(response_text)
+        return json.loads(response_text.strip())
     except Exception as e:
-        st.warning(f"Could not generate recipes: {e}")
+        st.warning(f"Recipe error: {e}")
         return None
 
-def generate_kids_recipes_with_cortex(child_age, dosha_type, herbs_list):
-    kid_herbs = [h for h in herbs_list if h.get('safe_kids', True) and h.get('min_age', 2) <= int(child_age.split("-")[0])]
-    herbs_text = ""
-    for h in kid_herbs[:8]:
-        herbs_text += f"- {h['english']} ({h['tamil']}): {h['uses']} | Prep: {h['preparation']} | Min Age: {h['min_age']}yr\n"
-
-    prompt = f"""You are a Tamil Nadu pediatric nutritionist with Siddha medicine expertise.
-Child Age: {child_age} years, Dosha: {dosha_type}
-
-Available Tamil Dishes: Vaazhapoo Sambar, Manathakkali Sambar, Kathirikai Murungakkai Sambar, Vegetable Biryani, Toor Dall Tadka, Potato Fry, Sundakkai Kadaisal, Murungakkai Poriyal, Cauliflower Pakora, Vendakkai Poriyal
-
-KID-SAFE MEDICINAL HERBS FROM DATABASE:
+def generate_kids_recipes_with_cortex(age, dosha, herbs_list):
+    kid_herbs = [h for h in herbs_list if h.get('safe_kids', True) and h.get('min_age', 2) <= int(age.split("-")[0])]
+    herbs_text = "\n".join([f"- {h['english']} ({h['tamil']}): {h['uses']} | Min Age: {h['min_age']}yr" for h in kid_herbs[:8]])
+    prompt = f"""Tamil Nadu pediatric nutritionist. Child: Age {age}yr, Dosha: {dosha}
+Kid-safe herbs from database:
 {herbs_text}
 
-Generate 3 kid-friendly recipes INCORPORATING these herbs. Return ONLY valid JSON, no markdown, no code blocks:
-
-{{"breakfast": {{"name": "Kid-friendly dish", "ingredients": "Simple ingredients", "health_benefits": "Growth and development benefits", "medicinal_herbs": "Which kid-safe herbs to add from database", "herb_preparation": "How to prepare herbs for kids", "why_better_than_junk": "Why better than junk food", "taste_profile": "Kid-friendly taste", "prep_time": "10-15 minutes", "portion_size": "Age-appropriate"}}, "lunch": {{"name": "Dish", "ingredients": "Ingredients", "health_benefits": "Benefits", "medicinal_herbs": "Herbs", "herb_preparation": "Prep method", "why_better_than_junk": "Why better", "taste_profile": "Taste", "prep_time": "15-20 min", "portion_size": "Amount"}}, "dinner": {{"name": "Dish", "ingredients": "Ingredients", "health_benefits": "Benefits", "medicinal_herbs": "Herbs", "herb_preparation": "Prep method", "why_better_than_junk": "Why better", "taste_profile": "Taste", "prep_time": "10-15 min", "portion_size": "Amount"}}, "parental_guidance": "Tips for introducing herbs to kids", "nutritional_summary": "Overall child development benefits"}}"""
-
+Return ONLY valid JSON:
+{{"breakfast": {{"name": "Dish", "ingredients": "List", "health_benefits": "Benefits", "medicinal_herbs": "Herbs", "herb_preparation": "Prep for kids", "why_better_than_junk": "Why better", "taste_profile": "Taste", "prep_time": "15 min", "portion_size": "Amount"}}, "lunch": {{"name": "Dish", "ingredients": "List", "health_benefits": "Benefits", "medicinal_herbs": "Herbs", "herb_preparation": "Prep", "why_better_than_junk": "Why", "taste_profile": "Taste", "prep_time": "20 min", "portion_size": "Amount"}}, "dinner": {{"name": "Dish", "ingredients": "List", "health_benefits": "Benefits", "medicinal_herbs": "Herbs", "herb_preparation": "Prep", "why_better_than_junk": "Why", "taste_profile": "Taste", "prep_time": "15 min", "portion_size": "Amount"}}, "parental_guidance": "Tips", "nutritional_summary": "Benefits"}}"""
     try:
-        message = client.messages.create(
-            model="claude-opus-4-20250514",
-            max_tokens=1500,
-            messages=[{"role": "user", "content": prompt}]
-        )
+        message = client.messages.create(model="claude-opus-4-20250514", max_tokens=1500, messages=[{"role": "user", "content": prompt}])
         response_text = message.content[0].text.strip()
         if response_text.startswith("```"):
             response_text = response_text.split("```")[1]
             if response_text.startswith("json"):
                 response_text = response_text[4:]
-        response_text = response_text.strip()
-        return json.loads(response_text)
+        return json.loads(response_text.strip())
     except Exception as e:
-        st.warning(f"Could not generate kids recipes: {e}")
+        st.warning(f"Kids recipe error: {e}")
         return None
 
-st.sidebar.title("🌿 AI Ayurvedic Food + Herbs")
-st.sidebar.markdown("Powered by Claude AI + Snowflake + Siddha Medicine")
+# ==================== SIDEBAR ====================
+st.sidebar.title("🌿 Tamil Ayurvedic Food Platform")
+st.sidebar.markdown("AI + Siddha + Weather + Herbs")
 st.sidebar.markdown("---")
 
-page = st.sidebar.radio("Navigate", ["👨‍🍳 Adult Nutrition", "👶 Kids Nutrition", "🌿 Herb Database", "📊 Feedback"])
+# Show live weather in sidebar
+weather = get_chennai_weather()
+st.sidebar.markdown(f"🌤️ **Chennai Now:** {weather['temp']}°C")
+st.sidebar.markdown(f"💧 Humidity: {weather['humidity']}%")
+st.sidebar.markdown(f"🌬️ {weather['desc']}")
+st.sidebar.markdown("---")
 
-if page == "👨‍🍳 Adult Nutrition":
+page = st.sidebar.radio("Navigate", ["👨‍🍳 Adult", "👶 Kids", "🌿 Herbs", "🔧 Admin", "📊 Feedback"])
+
+# ==================== ADULT PAGE ====================
+if page == "👨‍🍳 Adult":
     st.title("🌿 Daily Body Condition Check")
-    st.markdown("Log your symptoms - AI will classify dosha, match herbs from database, and recommend meals")
+    st.markdown(f"🌤️ **Live Chennai Weather:** {weather['temp']}°C, Humidity {weather['humidity']}%, {weather['desc']}")
 
-    with st.form("body_condition_form"):
+    with st.form("body_form"):
         col1, col2 = st.columns(2)
         with col1:
             st.header("Symptoms")
-            cold = st.slider("Cold/Runny Nose (0=None, 5=Severe)", 0, 5, 0)
+            cold = st.slider("Cold/Runny Nose", 0, 5, 0)
             cough = st.selectbox("Cough Type", ["None", "Dry", "Wet"])
             cough_severity = st.slider("Cough Severity", 0, 5, 0)
             pain_locations = st.multiselect("Pain Locations", ["Head", "Neck", "Shoulders", "Joints", "Abdomen", "Chest", "Back", "None"])
             pain_severity = st.slider("Pain Severity", 0, 5, 0)
-            pimple_count = st.number_input("Pimple/Acne Count", 0, 100, 0)
+            pimple_count = st.number_input("Pimple Count", 0, 100, 0)
         with col2:
             st.header("Body State")
-            sweating = st.selectbox("Sweating Level", ["Normal", "Excessive"])
-            sputum = st.selectbox("Sputum Color", ["Clear", "Yellow", "Green"])
-            urine = st.selectbox("Urine Color", ["Pale", "Amber", "Dark"])
+            sweating = st.selectbox("Sweating", ["Normal", "Excessive"])
+            sputum = st.selectbox("Sputum", ["Clear", "Yellow", "Green"])
+            urine = st.selectbox("Urine", ["Pale", "Amber", "Dark"])
             st.header("Energy & Digestion")
-            energy = st.slider("Energy Level (1=Very Low, 10=Very High)", 1, 10, 5)
-            digestion = st.selectbox("Digestion Quality", ["Good", "Normal", "Sluggish", "Weak"])
-
+            energy = st.slider("Energy Level", 1, 10, 5)
+            digestion = st.selectbox("Digestion", ["Good", "Normal", "Sluggish", "Weak"])
         user_id = st.text_input("Your ID", "user_001")
-        notes = st.text_area("Additional Notes", "")
-        submitted = st.form_submit_button("🤖 Analyze & Generate Recommendations", type="primary")
+        submitted = st.form_submit_button("🤖 Analyze with Weather + Herbs", type="primary")
 
         if submitted:
             try:
                 conn = get_snowflake_connection()
                 cursor = conn.cursor()
                 pain_locs = ",".join(pain_locations) if pain_locations else "None"
-                cursor.execute(f"""
-                    INSERT INTO BODY_CONDITION_LOG
-                    (USER_ID, LOG_DATE, COLD_INTENSITY, COUGH_TYPE, COUGH_SEVERITY,
-                     PAIN_LOCATIONS, PAIN_SEVERITY, PIMPLE_COUNT, SWEATING_LEVEL,
-                     SPUTUM_COLOR, URINE_COLOR, ENERGY_LEVEL, DIGESTION_QUALITY, NOTES)
-                    VALUES
-                    ('{user_id}', CURRENT_DATE(), {cold}, '{cough}', {cough_severity},
-                     '{pain_locs}', {pain_severity}, {pimple_count}, '{sweating}',
-                     '{sputum}', '{urine}', {energy}, '{digestion}', '{notes}')
-                """)
+                cursor.execute(f"""INSERT INTO BODY_CONDITION_LOG (USER_ID, LOG_DATE, COLD_INTENSITY, COUGH_TYPE, COUGH_SEVERITY, PAIN_LOCATIONS, PAIN_SEVERITY, PIMPLE_COUNT, SWEATING_LEVEL, SPUTUM_COLOR, URINE_COLOR, ENERGY_LEVEL, DIGESTION_QUALITY, WEATHER_CONDITION) VALUES ('{user_id}', CURRENT_DATE(), {cold}, '{cough}', {cough_severity}, '{pain_locs}', {pain_severity}, {pimple_count}, '{sweating}', '{sputum}', '{urine}', {energy}, '{digestion}', '{weather["temp"]}C {weather["desc"]}')""")
                 cursor.close()
                 conn.close()
-                st.success("✅ Body condition logged!")
+                st.success("✅ Logged with weather data!")
 
-                with st.spinner("🤖 AI analyzing symptoms..."):
-                    body_condition = {
-                        'cold': cold, 'cough': cough, 'cough_severity': cough_severity,
-                        'pain_locations': pain_locs, 'pain_severity': pain_severity,
-                        'pimple_count': pimple_count, 'energy': energy, 'digestion': digestion,
-                        'sweating': sweating, 'sputum': sputum, 'urine': urine
-                    }
-                    dosha_result = classify_dosha_with_cortex(body_condition)
-
-                    if dosha_result:
+                with st.spinner("🤖 Analyzing symptoms + weather..."):
+                    body = {'cold': cold, 'cough': cough, 'cough_severity': cough_severity, 'pain_locations': pain_locs, 'pain_severity': pain_severity, 'pimple_count': pimple_count, 'energy': energy, 'digestion': digestion, 'sweating': sweating, 'sputum': sputum, 'urine': urine}
+                    dosha = classify_dosha_with_cortex(body, weather)
+                    if dosha:
                         col1, col2, col3 = st.columns(3)
                         with col1:
-                            st.metric("Primary Dosha", f"{dosha_result['primary_dosha']}")
-                            st.metric("Primary %", f"{dosha_result['dosha_percent']}%")
+                            st.metric("Primary Dosha", dosha['primary_dosha'])
+                            st.metric("Primary %", f"{dosha['dosha_percent']}%")
                         with col2:
-                            st.metric("Secondary Dosha", f"{dosha_result.get('secondary_dosha', 'None')}")
-                            st.metric("Secondary %", f"{dosha_result.get('secondary_percent', 0)}%")
+                            st.metric("Secondary", dosha.get('secondary_dosha', 'None'))
                         with col3:
-                            confidence = dosha_result.get('confidence', 0.8)
-                            if isinstance(confidence, str):
-                                confidence = float(confidence)
-                            st.metric("Confidence", f"{confidence:.0%}")
+                            conf = dosha.get('confidence', 0.8)
+                            if isinstance(conf, str):
+                                conf = float(conf)
+                            st.metric("Confidence", f"{conf:.0%}")
+                        st.info(f"📋 {dosha['summary']}")
+                        st.info(f"🌤️ **Weather Impact:** {dosha.get('weather_impact', 'Weather considered')}")
 
-                        st.info(f"📋 **Analysis:** {dosha_result['summary']}")
-
-                        # Fetch matching herbs from Snowflake
-                        herbs = get_herbs_for_dosha(dosha_result['primary_dosha'])
-
+                        herbs = get_herbs_for_dosha(dosha['primary_dosha'])
                         if herbs:
                             st.markdown("---")
-                            st.subheader(f"🌿 Matching Medicinal Herbs for {dosha_result['primary_dosha']} Balance")
-                            st.write(f"Found **{len(herbs)} herbs** from database that reduce {dosha_result['primary_dosha']}:")
+                            st.subheader(f"🌿 {len(herbs)} Matching Herbs from Database")
                             for h in herbs:
-                                st.write(f"🌱 **{h['english']}** ({h['tamil']}) - {h['uses']} | Confidence: {h['score']}/10")
+                                st.write(f"🌱 **{h['english']}** ({h['tamil']}) - {h['uses']} | Score: {h['score']}/10")
 
-                        # Get season
                         try:
                             conn = get_snowflake_connection()
                             cursor = conn.cursor()
                             cursor.execute("SELECT SEASON FROM V_TODAY_DOSHA_RECOMMENDATION")
-                            season_result = cursor.fetchone()
+                            sr = cursor.fetchone()
                             cursor.close()
                             conn.close()
-                            season = season_result[0] if season_result else "Monsoon"
+                            season = sr[0] if sr else "Monsoon"
                         except:
                             season = "Monsoon"
 
-                        # Generate recipes with herbs
-                        with st.spinner("🤖 Generating herb-enhanced recipes..."):
-                            recipes = generate_recipes_with_cortex(dosha_result, season, energy, herbs)
-
+                        with st.spinner("🤖 Generating weather-adapted herb recipes..."):
+                            recipes = generate_recipes_with_cortex(dosha, season, energy, herbs, weather)
                             if recipes:
+                                for meal, icon in [("breakfast", "☀️"), ("lunch", "🌞"), ("dinner", "🌙")]:
+                                    st.markdown("---")
+                                    st.subheader(f"{icon} {meal.title()}")
+                                    st.markdown(f"**{recipes[meal]['name']}**")
+                                    st.write(f"📝 **Ingredients:** {recipes[meal]['ingredients']}")
+                                    st.write(f"🌿 **Herbs:** {recipes[meal]['medicinal_herbs']}")
+                                    st.write(f"🧪 **Herb Prep:** {recipes[meal].get('herb_preparation', '')}")
+                                    st.write(f"💪 **Benefits:** {recipes[meal]['nutritional_benefits']}")
+                                    st.write(f"⏱️ **Time:** {recipes[meal]['prep_time']}")
                                 st.markdown("---")
-                                st.subheader("☀️ Breakfast")
-                                st.markdown(f"**{recipes['breakfast']['name']}**")
-                                st.write(f"📝 **Ingredients:** {recipes['breakfast']['ingredients']}")
-                                st.write(f"🌿 **Medicinal Herbs:** {recipes['breakfast']['medicinal_herbs']}")
-                                st.write(f"🧪 **Herb Preparation:** {recipes['breakfast'].get('herb_preparation', 'As directed')}")
-                                st.write(f"💪 **Health Benefits:** {recipes['breakfast']['nutritional_benefits']}")
-                                st.write(f"✨ **Why This Dish:** {recipes['breakfast']['why_this_dish']}")
-                                st.write(f"⏱️ **Prep Time:** {recipes['breakfast']['prep_time']}")
-
-                                st.markdown("---")
-                                st.subheader("🌞 Lunch")
-                                st.markdown(f"**{recipes['lunch']['name']}**")
-                                st.write(f"📝 **Ingredients:** {recipes['lunch']['ingredients']}")
-                                st.write(f"🌿 **Medicinal Herbs:** {recipes['lunch']['medicinal_herbs']}")
-                                st.write(f"🧪 **Herb Preparation:** {recipes['lunch'].get('herb_preparation', 'As directed')}")
-                                st.write(f"💪 **Health Benefits:** {recipes['lunch']['nutritional_benefits']}")
-                                st.write(f"✨ **Why This Dish:** {recipes['lunch']['why_this_dish']}")
-                                st.write(f"⏱️ **Prep Time:** {recipes['lunch']['prep_time']}")
-
-                                st.markdown("---")
-                                st.subheader("🌙 Dinner")
-                                st.markdown(f"**{recipes['dinner']['name']}**")
-                                st.write(f"📝 **Ingredients:** {recipes['dinner']['ingredients']}")
-                                st.write(f"🌿 **Medicinal Herbs:** {recipes['dinner']['medicinal_herbs']}")
-                                st.write(f"🧪 **Herb Preparation:** {recipes['dinner'].get('herb_preparation', 'As directed')}")
-                                st.write(f"💪 **Health Benefits:** {recipes['dinner']['nutritional_benefits']}")
-                                st.write(f"✨ **Why This Dish:** {recipes['dinner']['why_this_dish']}")
-                                st.write(f"⏱️ **Prep Time:** {recipes['dinner']['prep_time']}")
-
-                                st.markdown("---")
-                                st.subheader("🛒 Shopping List")
-                                total_cost = recipes.get('total_cost', '0')
                                 if recipes.get('shopping_list'):
-                                    col1, col2, col3, col4 = st.columns(4)
-                                    col1.write("**Item**")
-                                    col2.write("**Qty**")
-                                    col3.write("**Unit**")
-                                    col4.write("**Price**")
+                                    st.subheader("🛒 Shopping List")
                                     for item in recipes['shopping_list']:
-                                        col1, col2, col3, col4 = st.columns(4)
-                                        col1.write(item.get('item', ''))
-                                        col2.write(str(item.get('quantity', '')))
-                                        col3.write(item.get('unit', ''))
-                                        col4.write(str(item.get('price_estimate', '')))
-                                st.metric("Total Cost", f"₹{total_cost}")
-                                st.info(f"💡 **Wellness Notes:** {recipes.get('wellness_notes', 'Personalized meal plan with medicinal herbs.')}")
-
+                                        st.write(f"• {item.get('item','')} - {item.get('quantity','')} {item.get('unit','')} (₹{item.get('price_estimate','')})")
+                                st.metric("Total Cost", f"₹{recipes.get('total_cost', '0')}")
+                                st.info(f"💡 {recipes.get('wellness_notes', '')}")
             except Exception as e:
-                st.error(f"Error: {str(e)}")
+                st.error(str(e))
 
-elif page == "👶 Kids Nutrition":
-    st.title("👶 Healthy Kids Nutrition with Medicinal Herbs")
-    st.markdown("Authentic Tamil recipes with kid-safe Siddha herbs - better than junk food!")
-
+# ==================== KIDS PAGE ====================
+elif page == "👶 Kids":
+    st.title("👶 Kids Nutrition with Medicinal Herbs")
     col1, col2 = st.columns(2)
     with col1:
-        child_age = st.selectbox("Child's Age", ["2-3 years", "4-6 years", "7-10 years", "11+ years"])
-        age_mapping = {"2-3 years": "2-3", "4-6 years": "4-6", "7-10 years": "7-10", "11+ years": "11+"}
-        age_value = age_mapping[child_age]
+        age = st.selectbox("Age", ["2-3 years", "4-6 years", "7-10 years", "11+ years"])
+        age_val = {"2-3 years": "2-3", "4-6 years": "4-6", "7-10 years": "7-10", "11+ years": "11+"}[age]
     with col2:
-        dosha_type = st.selectbox("Dosha Type (if known)", ["Not Sure", "Vata", "Pitta", "Kapha"])
+        dosha = st.selectbox("Dosha", ["Not Sure", "Vata", "Pitta", "Kapha"])
 
-    st.markdown("---")
-    st.subheader("📚 Available Tamil Dishes")
-    st.write("🍽️ Vaazhapoo Sambar | Manathakkali Keerai Sambar | Kathirikai Murungakkai Sambar")
-    st.write("🍽️ Vegetable Biryani | Toor Dall Tadka | Potato Fry | Sundakkai Kadaisal")
-    st.write("🍽️ Murungakkai Poriyal | Cauliflower Pakora | Vendakkai Poriyal")
-
-    st.markdown("---")
-    st.subheader("🌿 Kid-Safe Medicinal Herbs from Database")
     all_herbs = get_all_herbs()
-    kid_safe_count = 0
+    herbs = [{"english": r[0], "tamil": r[1], "part": r[2], "uses": r[3], "preparation": r[8] if len(r)>8 else "", "season": r[9] if len(r)>9 else "", "safe_kids": r[10] if len(r)>10 else True, "min_age": r[11] if len(r)>11 else 2, "score": r[12] if len(r)>12 else 7} for r in all_herbs]
+
+    if st.button("🤖 Get Herb-Enhanced Meal Plan", type="primary"):
+        with st.spinner("Creating..."):
+            kids = generate_kids_recipes_with_cortex(age_val, dosha, herbs)
+            if kids:
+                st.success("✅ Created!")
+                for meal, icon in [("breakfast", "☀️"), ("lunch", "🌞"), ("dinner", "🌙")]:
+                    st.markdown("---")
+                    st.subheader(f"{icon} {meal.title()}")
+                    st.markdown(f"**{kids[meal]['name']}**")
+                    st.write(f"📝 {kids[meal]['ingredients']}")
+                    st.write(f"💪 {kids[meal]['health_benefits']}")
+                    st.write(f"🌿 {kids[meal]['medicinal_herbs']}")
+                    st.write(f"🧪 {kids[meal].get('herb_preparation', '')}")
+                    st.info(f"✨ {kids[meal]['why_better_than_junk']}")
+                st.write(f"👨‍👩‍👧 {kids.get('parental_guidance', '')}")
+
+# ==================== HERB DATABASE PAGE ====================
+elif page == "🌿 Herbs":
+    st.title("🌿 Medicinal Herbs Database")
+    search = st.text_input("Search herb", "")
+    dosha_filter = st.selectbox("Filter by Dosha", ["All", "Vata", "Pitta", "Kapha"])
+    all_herbs = get_all_herbs()
+    st.write(f"**Total: {len(all_herbs)} herbs**")
     for row in all_herbs:
-        safe = row[10]
-        min_age = row[11]
-        age_num = int(age_value.split("-")[0])
-        if safe and min_age <= age_num:
-            kid_safe_count += 1
-            st.write(f"🌱 **{row[0]}** ({row[1]}) - {row[3]} | Min age: {min_age}yr | Score: {row[12]}/10")
-    st.write(f"**Total kid-safe herbs for age {child_age}: {kid_safe_count}**")
-
-    st.markdown("---")
-
-    if st.button("🤖 Get Personalized Herb-Enhanced Meal Plan", type="primary"):
-        herbs = []
-        for row in all_herbs:
-            herbs.append({
-                "english": row[0], "tamil": row[1], "part": row[2], "uses": row[3],
-                "preparation": row[8] if len(row) > 8 else "", "season": row[9] if len(row) > 9 else "",
-                "safe_kids": row[10] if len(row) > 10 else True, "min_age": row[11] if len(row) > 11 else 2,
-                "score": row[12] if len(row) > 12 else 7
-            })
-
-        with st.spinner("🤖 Creating herb-enhanced meal plan for your child..."):
-            kids_recipes = generate_kids_recipes_with_cortex(age_value, dosha_type, herbs)
-
-            if kids_recipes:
-                st.success("✅ Personalized meal plan created with medicinal herbs!")
-
-                st.subheader("☀️ Breakfast")
-                st.markdown(f"**{kids_recipes['breakfast']['name']}**")
-                st.write(f"📝 **Ingredients:** {kids_recipes['breakfast']['ingredients']}")
-                st.write(f"💪 **Health Benefits:** {kids_recipes['breakfast']['health_benefits']}")
-                st.write(f"🌿 **Medicinal Herbs:** {kids_recipes['breakfast']['medicinal_herbs']}")
-                st.write(f"🧪 **Herb Preparation:** {kids_recipes['breakfast'].get('herb_preparation', 'As directed')}")
-                st.write(f"😋 **Taste:** {kids_recipes['breakfast']['taste_profile']}")
-                st.write(f"📏 **Portion:** {kids_recipes['breakfast'].get('portion_size', 'Age-appropriate')}")
-                st.write(f"⏱️ **Prep Time:** {kids_recipes['breakfast']['prep_time']}")
-                st.info(f"✨ **Why Better Than Junk:** {kids_recipes['breakfast']['why_better_than_junk']}")
-
-                st.markdown("---")
-
-                st.subheader("🌞 Lunch")
-                st.markdown(f"**{kids_recipes['lunch']['name']}**")
-                st.write(f"📝 **Ingredients:** {kids_recipes['lunch']['ingredients']}")
-                st.write(f"💪 **Health Benefits:** {kids_recipes['lunch']['health_benefits']}")
-                st.write(f"🌿 **Medicinal Herbs:** {kids_recipes['lunch']['medicinal_herbs']}")
-                st.write(f"🧪 **Herb Preparation:** {kids_recipes['lunch'].get('herb_preparation', 'As directed')}")
-                st.write(f"😋 **Taste:** {kids_recipes['lunch']['taste_profile']}")
-                st.write(f"📏 **Portion:** {kids_recipes['lunch'].get('portion_size', 'Age-appropriate')}")
-                st.write(f"⏱️ **Prep Time:** {kids_recipes['lunch']['prep_time']}")
-                st.info(f"✨ **Why Better Than Junk:** {kids_recipes['lunch']['why_better_than_junk']}")
-
-                st.markdown("---")
-
-                st.subheader("🌙 Dinner")
-                st.markdown(f"**{kids_recipes['dinner']['name']}**")
-                st.write(f"📝 **Ingredients:** {kids_recipes['dinner']['ingredients']}")
-                st.write(f"💪 **Health Benefits:** {kids_recipes['dinner']['health_benefits']}")
-                st.write(f"🌿 **Medicinal Herbs:** {kids_recipes['dinner']['medicinal_herbs']}")
-                st.write(f"🧪 **Herb Preparation:** {kids_recipes['dinner'].get('herb_preparation', 'As directed')}")
-                st.write(f"😋 **Taste:** {kids_recipes['dinner']['taste_profile']}")
-                st.write(f"📏 **Portion:** {kids_recipes['dinner'].get('portion_size', 'Age-appropriate')}")
-                st.write(f"⏱️ **Prep Time:** {kids_recipes['dinner']['prep_time']}")
-                st.info(f"✨ **Why Better Than Junk:** {kids_recipes['dinner']['why_better_than_junk']}")
-
-                st.markdown("---")
-                st.subheader("👨‍👩‍👧 Parental Guidance")
-                st.write(kids_recipes.get('parental_guidance', 'Introduce herbs gradually.'))
-                st.subheader("📊 Nutritional Summary")
-                st.write(kids_recipes.get('nutritional_summary', 'Supports healthy development.'))
-
-elif page == "🌿 Herb Database":
-    st.title("🌿 Tamil Medicinal Herbs Database")
-    st.markdown("30 Siddha/Ayurvedic herbs from Snowflake MEDICINAL_HERBS table")
-
-    search = st.text_input("Search herb (English or Tamil name)", "")
-    dosha_filter = st.selectbox("Filter by Dosha Balance", ["All", "Vata", "Pitta", "Kapha"])
-
-    all_herbs = get_all_herbs()
-
-    if all_herbs:
-        st.write(f"**Total herbs in database: {len(all_herbs)}**")
+        eng, tam, part, uses = row[0] or "", row[1] or "", row[2] or "", row[3] or ""
+        vata, pitta, kapha = row[4] or "", row[5] or "", row[6] or ""
+        diseases, prep, season = row[7] or "", row[8] or "", row[9] or ""
+        safe, min_age, score = row[10], row[11] or 2, row[12] or 7
+        if search and search.lower() not in eng.lower() and search.lower() not in tam.lower():
+            continue
+        if dosha_filter != "All":
+            col_val = {"Vata": vata, "Pitta": pitta, "Kapha": kapha}[dosha_filter]
+            if col_val != "Decrease":
+                continue
+        col1, col2 = st.columns([1, 2])
+        with col1:
+            st.markdown(f"### 🌱 {eng}")
+            st.write(f"**Tamil:** {tam} | **Part:** {part} | **Score:** {score}/10")
+        with col2:
+            st.write(f"**Uses:** {uses}")
+            st.write(f"**Diseases:** {diseases}")
+            st.write(f"**Dosha:** V:{vata} | P:{pitta} | K:{kapha}")
         st.markdown("---")
 
-        for row in all_herbs:
-            english = row[0] or ""
-            tamil = row[1] or ""
-            part = row[2] or ""
-            uses = row[3] or ""
-            vata = row[4] or ""
-            pitta = row[5] or ""
-            kapha = row[6] or ""
-            diseases = row[7] or ""
-            preparation = row[8] or ""
-            season = row[9] or ""
-            safe_kids = row[10]
-            min_age = row[11] or 2
-            score = row[12] or 7
+# ==================== ADMIN PAGE ====================
+elif page == "🔧 Admin":
+    st.title("🔧 Admin - Add Herbs & Dishes")
+    st.markdown("Add new herbs and dishes directly to Snowflake")
 
-            if search and search.lower() not in english.lower() and search.lower() not in tamil.lower():
-                continue
+    admin_tab = st.radio("What to add?", ["🌿 New Herb", "🍽️ New Dish"])
 
-            if dosha_filter == "Vata" and vata != "Decrease":
-                continue
-            if dosha_filter == "Pitta" and pitta != "Decrease":
-                continue
-            if dosha_filter == "Kapha" and kapha != "Decrease":
-                continue
-
-            col1, col2 = st.columns([1, 2])
+    if admin_tab == "🌿 New Herb":
+        st.subheader("🌿 Add New Medicinal Herb")
+        with st.form("add_herb"):
+            col1, col2 = st.columns(2)
             with col1:
-                st.markdown(f"### 🌱 {english}")
-                st.write(f"**Tamil:** {tamil}")
-                st.write(f"**Part Used:** {part}")
-                st.write(f"**Season:** {season}")
-                st.write(f"**Score:** {score}/10")
-                kids_text = f"✅ Safe (age {min_age}+)" if safe_kids else "❌ Not recommended"
-                st.write(f"**Kids:** {kids_text}")
+                h_tamil = st.text_input("Tamil Name *", "")
+                h_english = st.text_input("English Name *", "")
+                h_botanical = st.text_input("Botanical Name", "")
+                h_part = st.selectbox("Plant Part", ["Leaves", "Root", "Seed", "Flower", "Bark", "Fruit", "Whole plant", "Rhizome", "Stem", "Bulb", "Oil", "Grain"])
+                h_uses = st.text_area("Primary Uses *", "")
+                h_diseases = st.text_area("Diseases Treated", "")
             with col2:
-                st.write(f"**Uses:** {uses}")
-                st.write(f"**Diseases:** {diseases}")
-                st.write(f"**Preparation:** {preparation}")
-                st.write(f"**Dosha:** Vata {vata} | Pitta {pitta} | Kapha {kapha}")
-            st.markdown("---")
-    else:
-        st.warning("No herbs found. Run MEDICINAL_HERBS_SCHEMA.sql in Snowflake first.")
+                h_vata = st.selectbox("Vata Effect", ["Decrease", "Increase", "Neutral"])
+                h_pitta = st.selectbox("Pitta Effect", ["Decrease", "Increase", "Neutral"])
+                h_kapha = st.selectbox("Kapha Effect", ["Decrease", "Increase", "Neutral"])
+                h_prep = st.text_input("Preparation Methods", "")
+                h_season = st.selectbox("Season", ["Year-round", "Summer", "Winter", "Monsoon"])
+                h_kids = st.checkbox("Safe for Kids", True)
+                h_age = st.number_input("Minimum Age", 1, 18, 3)
+                h_score = st.slider("Data Confidence Score", 1, 10, 7)
 
+            submitted = st.form_submit_button("✅ Add Herb to Database", type="primary")
+            if submitted and h_tamil and h_english and h_uses:
+                try:
+                    conn = get_snowflake_connection()
+                    cursor = conn.cursor()
+                    cursor.execute(f"""
+                        INSERT INTO MEDICINAL_HERBS 
+                        (NAME_TAMIL, NAME_ENGLISH, NAME_BOTANICAL, PLANT_PART, VATA_EFFECT, PITTA_EFFECT, KAPHA_EFFECT, PRIMARY_USES, DISEASES_TREATED, PREPARATION_METHODS, SEASONAL_AVAILABILITY, SAFE_FOR_KIDS, MIN_AGE_YEARS, DATA_CONFIDENCE_SCORE, SCIENTIFIC_VALIDATION)
+                        SELECT '{h_tamil}', '{h_english}', '{h_botanical}', '{h_part}', '{h_vata}', '{h_pitta}', '{h_kapha}', '{h_uses}', '{h_diseases}', '{h_prep}', '{h_season}', {h_kids}, {h_age}, {h_score}, FALSE
+                    """)
+                    cursor.close()
+                    conn.close()
+                    st.success(f"✅ Herb '{h_english}' added successfully!")
+                    st.balloons()
+                except Exception as e:
+                    st.error(f"Error: {e}")
+            elif submitted:
+                st.warning("Please fill Tamil Name, English Name, and Primary Uses")
+
+    elif admin_tab == "🍽️ New Dish":
+        st.subheader("🍽️ Add New Tamil Dish")
+        with st.form("add_dish"):
+            col1, col2 = st.columns(2)
+            with col1:
+                d_name = st.text_input("Dish Name *", "")
+                d_serves = st.number_input("Serves", 1, 10, 4)
+                d_prep = st.number_input("Prep Time (minutes)", 5, 120, 20)
+                d_dosha = st.selectbox("Dosha Suitability", ["Vata", "Pitta", "Kapha", "Neutral", "Vata/Pitta", "Vata/Kapha", "Pitta/Kapha"])
+            with col2:
+                d_season = st.selectbox("Best Season", ["Year-round", "Summer", "Winter", "Monsoon", "Post-Monsoon", "Summer/Monsoon", "Monsoon/Winter"])
+                d_method = st.text_input("Cooking Method", "")
+                d_instructions = st.text_area("Instructions", "")
+
+            submitted = st.form_submit_button("✅ Add Dish to Database", type="primary")
+            if submitted and d_name:
+                try:
+                    conn = get_snowflake_connection()
+                    cursor = conn.cursor()
+                    cursor.execute(f"""
+                        INSERT INTO RECIPES (RECIPE_NAME, PRIMARY_INGREDIENT_ID, SERVES, PREP_TIME_MIN, DOSHA_SUITABILITY, SEASONAL_BEST, COOKING_METHOD, INSTRUCTIONS)
+                        VALUES ('{d_name}', 1, {d_serves}, {d_prep}, '{d_dosha}', '{d_season}', '{d_method}', '{d_instructions}')
+                    """)
+                    cursor.close()
+                    conn.close()
+                    st.success(f"✅ Dish '{d_name}' added successfully!")
+                    st.balloons()
+                except Exception as e:
+                    st.error(f"Error: {e}")
+            elif submitted:
+                st.warning("Please enter Dish Name")
+
+    st.markdown("---")
+    st.subheader("📊 Current Database Stats")
+    try:
+        conn = get_snowflake_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM MEDICINAL_HERBS")
+        herb_count = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM RECIPES")
+        recipe_count = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM BODY_CONDITION_LOG")
+        log_count = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM USER_FEEDBACK")
+        feedback_count = cursor.fetchone()[0]
+        cursor.close()
+        conn.close()
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("🌿 Herbs", herb_count)
+        col2.metric("🍽️ Dishes", recipe_count)
+        col3.metric("📋 Logs", log_count)
+        col4.metric("📊 Feedback", feedback_count)
+    except:
+        st.info("Connect to Snowflake to see stats")
+
+# ==================== FEEDBACK PAGE ====================
 elif page == "📊 Feedback":
-    st.title("📊 How Was Yesterday?")
-    st.markdown("Your feedback helps Claude improve recommendations")
-
-    with st.form("feedback_form"):
+    st.title("📊 Feedback")
+    with st.form("feedback"):
         col1, col2, col3 = st.columns(3)
         with col1:
-            st.write("**☀️ Breakfast**")
-            breakfast_rating = st.slider("Breakfast Rating", 1, 5, 3, key="br")
-            breakfast_comment = st.text_area("Notes", "", key="bc")
+            br = st.slider("Breakfast", 1, 5, 3, key="br")
         with col2:
-            st.write("**🌞 Lunch**")
-            lunch_rating = st.slider("Lunch Rating", 1, 5, 3, key="lr")
-            lunch_comment = st.text_area("Notes", "", key="lc")
+            lr = st.slider("Lunch", 1, 5, 3, key="lr")
         with col3:
-            st.write("**🌙 Dinner**")
-            dinner_rating = st.slider("Dinner Rating", 1, 5, 3, key="dr")
-            dinner_comment = st.text_area("Notes", "", key="dc")
-
-        st.markdown("---")
-        energy_today = st.slider("Energy Level Today", 1, 10, 5)
-        digestion_today = st.selectbox("Digestion Quality Today", ["Good", "Normal", "Sluggish", "Weak"])
-        overall_satisfaction = st.slider("Overall Satisfaction", 1, 5, 3)
-        user_id = st.text_input("Your ID", "user_001")
-
-        submitted = st.form_submit_button("Submit Feedback", type="primary")
-        if submitted:
+            dr = st.slider("Dinner", 1, 5, 3, key="dr")
+        energy = st.slider("Energy Today", 1, 10, 5)
+        digestion = st.selectbox("Digestion", ["Good", "Normal", "Sluggish", "Weak"])
+        user_id = st.text_input("ID", "user_001")
+        if st.form_submit_button("Submit", type="primary"):
             try:
                 conn = get_snowflake_connection()
                 cursor = conn.cursor()
-                cursor.execute(f"""
-                    INSERT INTO USER_FEEDBACK
-                    (USER_ID, RECOMMENDATION_DATE, FEEDBACK_DATE, BREAKFAST_RATING, LUNCH_RATING, DINNER_RATING,
-                     OVERALL_SATISFACTION, ENERGY_LEVEL_NEXT_DAY, DIGESTION_QUALITY)
-                    VALUES
-                    ('{user_id}', CURRENT_DATE() - 1, CURRENT_DATE(), {breakfast_rating}, {lunch_rating},
-                     {dinner_rating}, {overall_satisfaction}, {energy_today}, '{digestion_today}')
-                """)
+                cursor.execute(f"""INSERT INTO USER_FEEDBACK (USER_ID, RECOMMENDATION_DATE, FEEDBACK_DATE, BREAKFAST_RATING, LUNCH_RATING, DINNER_RATING, ENERGY_LEVEL_NEXT_DAY, DIGESTION_QUALITY) VALUES ('{user_id}', CURRENT_DATE()-1, CURRENT_DATE(), {br}, {lr}, {dr}, {energy}, '{digestion}')""")
                 cursor.close()
                 conn.close()
-                st.success("✅ Feedback recorded!")
+                st.success("✅ Saved!")
             except Exception as e:
-                st.error(f"Error: {str(e)}")
+                st.error(str(e))

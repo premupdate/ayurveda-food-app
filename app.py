@@ -135,18 +135,70 @@ d_info = None
 for d in districts:
     if d[1]==sel_dist: d_info=d; break
 
-# Pincode selector
+# Pincode selector - type any pincode OR choose from list
 pincodes = get_pincodes(sel_dist)
 pin_info = None
-if pincodes:
+
+typed_pin = st.sidebar.text_input("📮 Enter Pincode", "", placeholder="e.g., 625531")
+
+if typed_pin.strip():
+    # Check if pincode exists in database
+    found = None
+    for p in pincodes:
+        if p[0] == typed_pin.strip():
+            found = p
+            break
+    
+    if found:
+        pin_info = found
+        specific_land = pin_info[3]
+        weather_loc = pin_info[5]
+        st.sidebar.success(f"📍 **{pin_info[1]}** ({pin_info[2]})")
+        st.sidebar.markdown(f"{land_icons.get(specific_land,'🌍')} **Land:** {specific_land} ({pin_info[4]})")
+        if pin_info[6]:
+            st.sidebar.markdown(f"📝 {pin_info[6]}")
+    else:
+        # AI classifies unknown pincode
+        with st.sidebar.status("🤖 AI identifying area..."):
+            pin_result = ai(f"""Indian geography expert. Pincode {typed_pin} in {sel_dist} district, Tamil Nadu.
+Identify the area and classify which Ainthinai land it belongs to.
+Ainthinai options: Kurinji (mountains/hills), Mullai (forest/pastoral), Marutham (agricultural plains), Neidhal (coastal), Palai (arid/desert)
+
+Return JSON: {{"area_name": "Name of area", "area_name_tamil": "Tamil name", "specific_land": "Kurinji or Mullai or Marutham or Neidhal or Palai", "elevation": "Plains or Foothills or Hills or Coastal or Dry Plains", "latitude": 10.5, "longitude": 77.5, "weather_location": "Nearest city for weather", "notes": "Brief description of the area"}}""")
+            
+            if pin_result:
+                specific_land = pin_result.get('specific_land', d_info[4] if d_info else 'Marutham')
+                weather_loc = pin_result.get('weather_location', d_info[6] if d_info else 'Chennai')
+                
+                st.sidebar.success(f"📍 **{pin_result.get('area_name', 'Unknown')}** ({pin_result.get('area_name_tamil', '')})")
+                st.sidebar.markdown(f"{land_icons.get(specific_land,'🌍')} **Land:** {specific_land} ({pin_result.get('elevation', '')})")
+                st.sidebar.markdown(f"📝 {pin_result.get('notes', '')}")
+                
+                # Save to database for future use
+                try:
+                    conn = db(); cur = conn.cursor()
+                    cur.execute("INSERT INTO pincode_land_mapping (pincode, area_name, area_name_tamil, district_name, specific_land, elevation_category, latitude, longitude, weather_location, notes) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
+                        (typed_pin, pin_result.get('area_name',''), pin_result.get('area_name_tamil',''), sel_dist, specific_land, pin_result.get('elevation',''), pin_result.get('latitude',0), pin_result.get('longitude',0), weather_loc, pin_result.get('notes','')))
+                    conn.commit(); cur.close(); conn.close()
+                    st.sidebar.info("✅ Saved! Next time this pincode loads instantly.")
+                except:
+                    pass
+                
+                pin_info = (typed_pin, pin_result.get('area_name',''), pin_result.get('area_name_tamil',''), specific_land, pin_result.get('elevation',''), weather_loc, pin_result.get('notes',''))
+            else:
+                specific_land = d_info[4] if d_info else "Marutham"
+                weather_loc = d_info[6] if d_info else "Chennai"
+                st.sidebar.warning(f"Could not identify pincode. Using district default: {specific_land}")
+
+elif pincodes:
+    st.sidebar.markdown("**Or choose from known areas:**")
     pin_labels = [f"{p[0]} - {p[1]} ({p[3]})" for p in pincodes]
-    sel_pin_idx = st.sidebar.selectbox("📮 Pincode/Area", range(len(pin_labels)), format_func=lambda i: pin_labels[i])
+    sel_pin_idx = st.sidebar.selectbox("Known Areas", range(len(pin_labels)), format_func=lambda i: pin_labels[i])
     pin_info = pincodes[sel_pin_idx]
     specific_land = pin_info[3]
     weather_loc = pin_info[5]
     st.sidebar.markdown(f"📍 **{pin_info[1]}** ({pin_info[2]})")
     st.sidebar.markdown(f"{land_icons.get(specific_land,'🌍')} **Land:** {specific_land} ({pin_info[4]})")
-    if pin_info[6]: st.sidebar.markdown(f"📝 {pin_info[6]}")
 else:
     specific_land = d_info[4] if d_info else "Marutham"
     weather_loc = d_info[6] if d_info else "Chennai"

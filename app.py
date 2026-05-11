@@ -28,14 +28,35 @@ def get_db():
 def ask_gemini(prompt):
     try:
         r = gemini_model.generate_content(prompt)
+        if not r or not r.text:
+            st.warning("AI returned empty response. Try again.")
+            return None
         t = r.text.strip()
-        if t.startswith("```"):
-            t = t.split("```")[1]
-            if t.startswith("json"):
-                t = t[4:]
-        return json.loads(t.strip())
+        # Remove markdown code blocks
+        if "```json" in t:
+            t = t.split("```json")[1].split("```")[0]
+        elif "```" in t:
+            t = t.split("```")[1].split("```")[0]
+        t = t.strip()
+        if not t:
+            st.warning("AI returned empty text. Try again.")
+            return None
+        return json.loads(t)
+    except json.JSONDecodeError:
+        st.warning("AI response was not valid JSON. Retrying...")
+        try:
+            r2 = gemini_model.generate_content(prompt + "\n\nIMPORTANT: Return ONLY valid JSON. No text before or after.")
+            t2 = r2.text.strip()
+            if "```json" in t2:
+                t2 = t2.split("```json")[1].split("```")[0]
+            elif "```" in t2:
+                t2 = t2.split("```")[1].split("```")[0]
+            return json.loads(t2.strip())
+        except:
+            st.warning("Could not parse AI response after retry.")
+            return None
     except Exception as e:
-        st.warning(f"AI: {e}")
+        st.warning(f"AI error: {e}")
         return None
 
 def get_weather(location="Chennai"):

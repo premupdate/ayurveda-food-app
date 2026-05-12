@@ -43,7 +43,7 @@ def ai(prompt):
         except: return None
     except: return None
 
-def weather(loc="Chennai"):
+def get_weather(loc="Chennai"):
     try:
         r = requests.get(f"https://wttr.in/{loc}?format=j1",timeout=5).json()
         c = r['current_condition'][0]
@@ -75,13 +75,6 @@ def get_pincodes(district):
         cur.execute("SELECT pincode,area_name,area_name_tamil,specific_land,elevation_category,weather_location,notes FROM pincode_land_mapping WHERE district_name=%s ORDER BY pincode",(district,))
         r = cur.fetchall(); cur.close(); c.close(); return r
     except: return []
-
-def get_land_details(lid):
-    try:
-        c = db(); cur = c.cursor()
-        cur.execute("SELECT name_tamil,name_english,land_type,description_english FROM ainthinai_lands WHERE land_id=%s",(lid,))
-        r = cur.fetchone(); cur.close(); c.close(); return r
-    except: return None
 
 def get_flora(lid, skw):
     try:
@@ -121,7 +114,18 @@ def save_health_conditions(uid, conditions):
         c.commit(); cur.close(); c.close(); return True
     except: return False
 
+def lookup_pincode(pincode):
+    try:
+        resp = requests.get(f"https://api.postalpincode.in/pincode/{pincode}", timeout=10)
+        api_r = resp.json()
+        if api_r and api_r[0].get('Status') == 'Success' and api_r[0].get('PostOffice'):
+            po = api_r[0]['PostOffice'][0]
+            return {"area": po.get('Name',''), "district": po.get('District',''), "state": po.get('State',''), "region": po.get('Region','')}
+    except: pass
+    return None
+
 land_icons = {"Kurinji":"🏔️","Mullai":"🌳","Marutham":"🌾","Neidhal":"🌊","Palai":"🏜️"}
+land_id_map = {"Kurinji":1,"Mullai":2,"Marutham":3,"Neidhal":4,"Palai":5}
 
 # ==================== SIDEBAR ====================
 st.sidebar.title("🌿 Tamil Ayurvedic Platform")
@@ -135,80 +139,62 @@ d_info = None
 for d in districts:
     if d[1]==sel_dist: d_info=d; break
 
-# Pincode selector - type any pincode OR choose from list
+# Pincode
 pincodes = get_pincodes(sel_dist)
 pin_info = None
+typed_pin = st.sidebar.text_input("📮 Pincode", "", placeholder="e.g., 625531")
 
-typed_pin = st.sidebar.text_input("📮 Enter Pincode", "", placeholder="e.g., 625531")
-
-if typed_pin.strip():
-    # Check if pincode exists in database
+if typed_pin.strip() and len(typed_pin.strip()) == 6:
+    pincode = typed_pin.strip()
     found = None
-    for p in pincodes:
-        if p[0] == typed_pin.strip():
-            found = p
-            break
-    
+    try:
+        conn = db(); cur = conn.cursor()
+        cur.execute("SELECT pincode,area_name,area_name_tamil,specific_land,elevation_category,weather_location,notes FROM pincode_land_mapping WHERE pincode=%s", (pincode,))
+        row = cur.fetchone(); cur.close(); conn.close()
+        if row: found = row
+    except: pass
+
     if found:
         pin_info = found
-        specific_land = pin_info[3]
-        weather_loc = pin_info[5]
-        st.sidebar.success(f"📍 **{pin_info[1]}** ({pin_info[2]})")
-        st.sidebar.markdown(f"{land_icons.get(specific_land,'🌍')} **Land:** {specific_land} ({pin_info[4]})")
-        if pin_info[6]:
-            st.sidebar.markdown(f"📝 {pin_info[6]}")
+        specific_land = pin_info[3]; weather_loc = pin_info[5]
+        st.sidebar.success(f"📍 {pin_info[1]} ({pin_info[2]})")
+        st.sidebar.markdown(f"{land_icons.get(specific_land,'🌍')} {specific_land} ({pin_info[4]})")
     else:
-        # AI classifies unknown pincode
-        with st.sidebar.status("🤖 AI identifying area..."):
-            pin_result = ai(f"""Indian geography expert. Pincode {typed_pin} in {sel_dist} district, Tamil Nadu.
-Identify the area and classify which Ainthinai land it belongs to.
-Ainthinai options: Kurinji (mountains/hills), Mullai (forest/pastoral), Marutham (agricultural plains), Neidhal (coastal), Palai (arid/desert)
-
-Return JSON: {{"area_name": "Name of area", "area_name_tamil": "Tamil name", "specific_land": "Kurinji or Mullai or Marutham or Neidhal or Palai", "elevation": "Plains or Foothills or Hills or Coastal or Dry Plains", "latitude": 10.5, "longitude": 77.5, "weather_location": "Nearest city for weather", "notes": "Brief description of the area"}}""")
-            
-            if pin_result:
-                specific_land = pin_result.get('specific_land', d_info[4] if d_info else 'Marutham')
-                weather_loc = pin_result.get('weather_location', d_info[6] if d_info else 'Chennai')
-                
-                st.sidebar.success(f"📍 **{pin_result.get('area_name', 'Unknown')}** ({pin_result.get('area_name_tamil', '')})")
-                st.sidebar.markdown(f"{land_icons.get(specific_land,'🌍')} **Land:** {specific_land} ({pin_result.get('elevation', '')})")
-                st.sidebar.markdown(f"📝 {pin_result.get('notes', '')}")
-                
-                # Save to database for future use
-                try:
-                    conn = db(); cur = conn.cursor()
-                    cur.execute("INSERT INTO pincode_land_mapping (pincode, area_name, area_name_tamil, district_name, specific_land, elevation_category, latitude, longitude, weather_location, notes) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
-                        (typed_pin, pin_result.get('area_name',''), pin_result.get('area_name_tamil',''), sel_dist, specific_land, pin_result.get('elevation',''), pin_result.get('latitude',0), pin_result.get('longitude',0), weather_loc, pin_result.get('notes','')))
-                    conn.commit(); cur.close(); conn.close()
-                    st.sidebar.info("✅ Saved! Next time this pincode loads instantly.")
-                except:
-                    pass
-                
-                pin_info = (typed_pin, pin_result.get('area_name',''), pin_result.get('area_name_tamil',''), specific_land, pin_result.get('elevation',''), weather_loc, pin_result.get('notes',''))
+        with st.sidebar.status("🔍 Looking up pincode..."):
+            api_data = lookup_pincode(pincode)
+            if api_data:
+                st.sidebar.info(f"📮 {api_data['area']}, {api_data['district']}")
+                land_result = ai(f"""Geography expert. Location: {api_data['area']}, {api_data['district']}, Tamil Nadu. Pincode: {pincode}.
+Classify Ainthinai: Kurinji(mountains), Mullai(forest), Marutham(plains), Neidhal(coastal), Palai(arid).
+Return JSON: {{"area_name":"{api_data['area']}","area_name_tamil":"Tamil name","specific_land":"Kurinji/Mullai/Marutham/Neidhal/Palai","elevation":"Plains/Foothills/Hills/Coastal/Dry Plains","weather_location":"{api_data['district']}","notes":"Brief terrain description"}}""")
+                if land_result:
+                    specific_land = land_result.get('specific_land', d_info[4] if d_info else 'Marutham')
+                    weather_loc = land_result.get('weather_location', api_data['district'])
+                    st.sidebar.success(f"📍 {land_result.get('area_name','')} ({land_result.get('area_name_tamil','')})")
+                    st.sidebar.markdown(f"{land_icons.get(specific_land,'🌍')} {specific_land} ({land_result.get('elevation','')})")
+                    try:
+                        conn = db(); cur = conn.cursor()
+                        cur.execute("INSERT INTO pincode_land_mapping (pincode,area_name,area_name_tamil,district_name,specific_land,elevation_category,weather_location,notes) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+                            (pincode,land_result.get('area_name',''),land_result.get('area_name_tamil',''),api_data['district'],specific_land,land_result.get('elevation',''),weather_loc,land_result.get('notes','')))
+                        conn.commit(); cur.close(); conn.close()
+                        st.sidebar.info("✅ Saved for next time!")
+                    except: pass
+                    pin_info = (pincode,land_result.get('area_name',''),land_result.get('area_name_tamil',''),specific_land,land_result.get('elevation',''),weather_loc,land_result.get('notes',''))
+                else:
+                    specific_land = d_info[4] if d_info else "Marutham"; weather_loc = api_data['district']
             else:
-                specific_land = d_info[4] if d_info else "Marutham"
-                weather_loc = d_info[6] if d_info else "Chennai"
-                st.sidebar.warning(f"Could not identify pincode. Using district default: {specific_land}")
-
+                specific_land = d_info[4] if d_info else "Marutham"; weather_loc = d_info[6] if d_info else "Chennai"
+                st.sidebar.warning("Pincode not found.")
 elif pincodes:
-    st.sidebar.markdown("**Or choose from known areas:**")
+    st.sidebar.markdown("**Known areas:**")
     pin_labels = [f"{p[0]} - {p[1]} ({p[3]})" for p in pincodes]
-    sel_pin_idx = st.sidebar.selectbox("Known Areas", range(len(pin_labels)), format_func=lambda i: pin_labels[i])
-    pin_info = pincodes[sel_pin_idx]
-    specific_land = pin_info[3]
-    weather_loc = pin_info[5]
-    st.sidebar.markdown(f"📍 **{pin_info[1]}** ({pin_info[2]})")
-    st.sidebar.markdown(f"{land_icons.get(specific_land,'🌍')} **Land:** {specific_land} ({pin_info[4]})")
+    sel_idx = st.sidebar.selectbox("Areas", range(len(pin_labels)), format_func=lambda i: pin_labels[i])
+    pin_info = pincodes[sel_idx]; specific_land = pin_info[3]; weather_loc = pin_info[5]
 else:
-    specific_land = d_info[4] if d_info else "Marutham"
-    weather_loc = d_info[6] if d_info else "Chennai"
-    st.sidebar.markdown(f"{land_icons.get(specific_land,'🌍')} **Land:** {specific_land}")
+    specific_land = d_info[4] if d_info else "Marutham"; weather_loc = d_info[6] if d_info else "Chennai"
 
-# Map specific_land to land_id
-land_id_map = {"Kurinji":1,"Mullai":2,"Marutham":3,"Neidhal":4,"Palai":5}
 current_land_id = land_id_map.get(specific_land, 3)
-
-w = weather(weather_loc)
+w = get_weather(weather_loc)
 ts = tamil_season()
 skw = season_kw(ts[1])
 
@@ -225,106 +211,67 @@ page = st.sidebar.radio("Navigate",["👨‍🍳 Adult","👶 Kids","🏔️ Ain
 # ==================== ADULT PAGE ====================
 if page=="👨‍🍳 Adult":
     st.title("🌿 Daily Body Condition Check")
-    
-    # Context bar
     col1,col2,col3,col4 = st.columns(4)
-    col1.metric("📍 Location",pin_info[1] if pin_info else sel_dist)
-    col2.metric(f"{land_icons.get(specific_land,'🌍')} Land",f"{specific_land}")
+    col1.metric("📍",pin_info[1] if pin_info else sel_dist)
+    col2.metric(f"{land_icons.get(specific_land,'🌍')} Land",specific_land)
     col3.metric("🌦️ Season",ts[1].split("(")[0].strip())
-    col4.metric("🌤️ Weather",f"{w['temp']}°C")
-    
-    # Local flora
+    col4.metric("🌤️",f"{w['temp']}°C")
+
     local_flora = get_flora(current_land_id, skw)
     if local_flora:
-        ft = ", ".join([f[2] for f in local_flora[:8]])
-        st.info(f"🌿 **Available now in {specific_land} during {ts[1]}:** {ft}")
+        st.info(f"🌿 **Available now in {specific_land}:** {', '.join([f[2] for f in local_flora[:8]])}")
 
     st.markdown("---")
-    
     with st.form("body"):
         col1,col2 = st.columns(2)
         with col1:
             st.header("Symptoms")
-            cold = st.slider("Cold/Runny Nose",0,5,0)
-            cough = st.selectbox("Cough",["None","Dry","Wet"])
-            cough_sev = st.slider("Cough Severity",0,5,0)
-            pain = st.multiselect("Pain",["Head","Neck","Joints","Abdomen","Chest","Back","None"])
-            pain_sev = st.slider("Pain Severity",0,5,0)
+            cold = st.slider("Cold/Runny Nose",0,5,0); cough = st.selectbox("Cough",["None","Dry","Wet"]); cough_sev = st.slider("Cough Severity",0,5,0)
+            pain = st.multiselect("Pain",["Head","Neck","Joints","Abdomen","Chest","Back","None"]); pain_sev = st.slider("Pain Severity",0,5,0)
             pimples = st.number_input("Pimples",0,100,0)
         with col2:
             st.header("Body State")
-            sweating = st.selectbox("Sweating",["Normal","Excessive"])
-            sputum = st.selectbox("Sputum",["Clear","Yellow","Green"])
-            urine = st.selectbox("Urine",["Pale","Amber","Dark"])
-            energy = st.slider("Energy",1,10,5)
-            digestion = st.selectbox("Digestion",["Good","Normal","Sluggish","Weak"])
-        
+            sweating = st.selectbox("Sweating",["Normal","Excessive"]); sputum = st.selectbox("Sputum",["Clear","Yellow","Green"]); urine = st.selectbox("Urine",["Pale","Amber","Dark"])
+            energy = st.slider("Energy",1,10,5); digestion = st.selectbox("Digestion",["Good","Normal","Sluggish","Weak"])
+
         st.markdown("---")
-        st.header("📝 Your Health Conditions")
-        st.markdown("Tell AI about chronic conditions, allergies, medications, pregnancy, etc.")
-        
+        st.header("📝 Health Conditions")
         user_id = st.text_input("Your ID","user_001")
-        
-        # Show existing health profile
         existing = get_health_profile(user_id)
         if existing:
-            st.markdown("**⚠️ Conditions already on file:**")
-            for ex in existing:
-                st.write(f"• **{ex[0]}** ({ex[1]}) - {ex[2]} | Diet: {ex[3]}")
-        
-        health_notes = st.text_area("Describe your health conditions (AI will parse and remember)","",height=100,
-            placeholder="Example: I have Type 2 diabetes for 5 years, taking Metformin. Mild knee arthritis. Wife is 6 months pregnant. Child has lactose intolerance.")
-        
+            st.markdown("**⚠️ On file:**")
+            for ex in existing: st.write(f"• **{ex[0]}** ({ex[1]}) - {ex[2]}")
+        health_notes = st.text_area("Describe conditions (AI parses & remembers)","",height=80,placeholder="Example: Type 2 diabetes, knee arthritis, wife is pregnant")
+
         if st.form_submit_button("🤖 Analyze with Full Context",type="primary"):
             try:
-                conn = db(); cur = conn.cursor()
-                pain_locs = ",".join(pain) if pain else "None"
-                pincode_val = pin_info[0] if pin_info else ""
+                conn = db(); cur = conn.cursor(); pain_locs = ",".join(pain) if pain else "None"
                 cur.execute("INSERT INTO body_condition_log (user_id,log_date,cold_intensity,cough_type,cough_severity,pain_locations,pain_severity,pimple_count,sweating_level,sputum_color,urine_color,energy_level,digestion_quality,weather_condition,health_notes,pincode,specific_land) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-                    (user_id,date.today(),cold,cough,cough_sev,pain_locs,pain_sev,pimples,sweating,sputum,urine,energy,digestion,f"{weather_loc} {w['temp']}C {w['desc']}",health_notes,pincode_val,specific_land))
+                    (user_id,date.today(),cold,cough,cough_sev,pain_locs,pain_sev,pimples,sweating,sputum,urine,energy,digestion,f"{weather_loc} {w['temp']}C {w['desc']}",health_notes,typed_pin.strip() if typed_pin.strip() else "",specific_land))
                 conn.commit(); cur.close(); conn.close()
-                st.success("✅ Logged with location + health data!")
-                
-                # Parse health notes with AI
+                st.success("✅ Logged!")
+
                 parsed_conditions = []
                 if health_notes.strip():
                     with st.spinner("🤖 Parsing health conditions..."):
-                        parsed = ai(f"""Medical analyst. Parse health conditions from: "{health_notes}"
-Return JSON: {{"conditions": [{{"name": "Condition", "category": "Metabolic/Musculoskeletal/Reproductive/Allergy/Recent", "severity": "Mild/Moderate/Severe", "dietary_impact": "Diet restrictions", "avoid_herbs": "Herbs to avoid", "recommended_herbs": "Herbs that help"}}]}}""")
+                        parsed = ai(f"""Parse health conditions: "{health_notes}". Return JSON: {{"conditions":[{{"name":"Condition","category":"Metabolic/Musculoskeletal/Reproductive/Allergy","severity":"Mild/Moderate/Severe","dietary_impact":"Diet restrictions","avoid_herbs":"Herbs to avoid","recommended_herbs":"Herbs that help"}}]}}""")
                         if parsed and parsed.get('conditions'):
                             parsed_conditions = parsed['conditions']
                             save_health_conditions(user_id, parsed_conditions)
-                            st.markdown("---")
-                            st.subheader("⚠️ Health Conditions Detected & Saved:")
                             for pc in parsed_conditions:
-                                st.write(f"• **{pc.get('name','')}** ({pc.get('category','')}) - {pc.get('severity','')}")
-                                st.write(f"  🍽️ Diet: {pc.get('dietary_impact','')}")
-                                st.write(f"  ❌ Avoid: {pc.get('avoid_herbs','')}")
-                                st.write(f"  ✅ Recommended: {pc.get('recommended_herbs','')}")
-                
-                # Build full health context
-                all_conditions = existing + [(pc.get('name',''),pc.get('category',''),pc.get('severity',''),pc.get('dietary_impact',''),pc.get('avoid_herbs',''),pc.get('recommended_herbs','')) for pc in parsed_conditions]
-                health_context = ""
-                avoid_herbs = ""
-                recommend_herbs = ""
-                if all_conditions:
-                    health_context = "\n".join([f"- {c[0]} ({c[1]}): {c[2]}. Diet: {c[3]}" for c in all_conditions])
-                    avoid_herbs = ", ".join([c[4] for c in all_conditions if c[4]])
-                    recommend_herbs = ", ".join([c[5] for c in all_conditions if c[5]])
-                
-                body = {'cold':cold,'cough':cough,'cough_severity':cough_sev,'pain_locations':pain_locs,'pain_severity':pain_sev,'pimple_count':pimples,'energy':energy,'digestion':digestion,'sweating':sweating,'sputum':sputum,'urine':urine}
-                
-                # Classify dosha
-                with st.spinner("🤖 Classifying dosha..."):
-                    dosha = ai(f"""Tamil Siddha expert. Consider body, land, season, weather, AND health conditions.
-Body: {json.dumps(body)}
-Location: {pin_info[1] if pin_info else sel_dist} ({specific_land} land, {pin_info[4] if pin_info else 'Plains'})
-Season: {ts[1]} (Dominant: {ts[2]})
-Weather: {w['temp']}C, Humidity {w['humidity']}%, {w['desc']}
-Health Conditions: {health_context if health_context else 'None reported'}
+                                st.write(f"⚠️ **{pc.get('name','')}** - ❌ Avoid: {pc.get('avoid_herbs','')} | ✅ Use: {pc.get('recommended_herbs','')}")
 
-Return JSON: {{"primary_dosha":"Vata/Pitta/Kapha","dosha_percent":75,"secondary_dosha":"X","secondary_percent":25,"confidence":0.9,"summary":"Include land+season+health impact","weather_impact":"Weather effect","season_impact":"Season effect","land_impact":"Land effect","health_impact":"How conditions affect recommendation"}}""")
-                    
+                all_conds = existing + [(pc.get('name',''),pc.get('category',''),pc.get('severity',''),pc.get('dietary_impact',''),pc.get('avoid_herbs',''),pc.get('recommended_herbs','')) for pc in parsed_conditions]
+                health_ctx = "\n".join([f"- {c[0]}: {c[3]}" for c in all_conds]) if all_conds else "None"
+                avoid = ", ".join([c[4] for c in all_conds if c[4]]) if all_conds else "None"
+                recommend = ", ".join([c[5] for c in all_conds if c[5]]) if all_conds else "Any"
+
+                body = {'cold':cold,'cough':cough,'cough_severity':cough_sev,'pain_locations':pain_locs,'pain_severity':pain_sev,'pimple_count':pimples,'energy':energy,'digestion':digestion,'sweating':sweating,'sputum':sputum,'urine':urine}
+
+                with st.spinner("🤖 Classifying dosha..."):
+                    dosha = ai(f"""Siddha expert. Body: {json.dumps(body)}, Location: {pin_info[1] if pin_info else sel_dist} ({specific_land}), Season: {ts[1]} ({ts[2]}), Weather: {w['temp']}C {w['desc']}, Health: {health_ctx}
+Return JSON: {{"primary_dosha":"Vata/Pitta/Kapha","dosha_percent":75,"secondary_dosha":"X","secondary_percent":25,"confidence":0.9,"summary":"Brief","weather_impact":"Weather","season_impact":"Season","land_impact":"Land","health_impact":"Health conditions impact"}}""")
+
                     if dosha:
                         col1,col2,col3 = st.columns(3)
                         col1.metric("Dosha",f"{dosha['primary_dosha']} ({dosha['dosha_percent']}%)")
@@ -332,69 +279,32 @@ Return JSON: {{"primary_dosha":"Vata/Pitta/Kapha","dosha_percent":75,"secondary_
                         conf=dosha.get('confidence',0.8)
                         if isinstance(conf,str): conf=float(conf)
                         col3.metric("Confidence",f"{conf:.0%}")
-                        
                         st.info(f"📋 {dosha['summary']}")
-                        st.info(f"🌤️ Weather: {dosha.get('weather_impact','')}")
-                        st.info(f"🌦️ Season: {dosha.get('season_impact','')}")
-                        st.info(f"🏔️ Land: {dosha.get('land_impact','')}")
-                        if dosha.get('health_impact'):
-                            st.warning(f"⚠️ Health: {dosha.get('health_impact','')}")
-                        
+                        if dosha.get('health_impact'): st.warning(f"⚠️ Health: {dosha['health_impact']}")
+
                         herbs = get_herbs_dosha(dosha['primary_dosha'])
                         if herbs:
-                            st.markdown("---")
-                            st.subheader(f"🌿 {len(herbs)} Matching Herbs")
-                            for h in herbs[:6]:
-                                st.write(f"🌱 **{h['english']}** ({h['tamil']}) - {h['uses']}")
-                        
-                        if local_flora:
-                            st.markdown("---")
-                            st.subheader(f"🌾 Local Flora in {specific_land}")
-                            for f in local_flora[:6]:
-                                ti={"Herb":"🌱","Flower":"🌸","Fruit":"🍎","Tree":"🌳","Grain":"🌾"}.get(f[0],"🌿")
-                                st.write(f"{ti} **{f[2]}** ({f[1]}) - {f[6]}")
-                        
+                            st.markdown("---"); st.subheader(f"🌿 {len(herbs)} Matching Herbs")
+                            for h in herbs[:6]: st.write(f"🌱 **{h['english']}** ({h['tamil']}) - {h['uses']}")
+
                         herbs_text = "\n".join([f"- {h['english']}: {h['uses']}" for h in herbs[:8]])
                         flora_text = "\n".join([f"- {f[2]}: {f[6]} | Cook: {f[7]}" for f in local_flora[:8]])
-                        
-                        with st.spinner("🤖 Generating hyper-local recipes..."):
-                            recipes = ai(f"""Tamil Ayurvedic chef. HYPER-LOCAL recipes using locally available ingredients.
-Dosha: {dosha['primary_dosha']} ({dosha['dosha_percent']}%)
-Location: {pin_info[1] if pin_info else sel_dist} ({specific_land}, {pin_info[4] if pin_info else 'Plains'})
-Season: {ts[1]}, Weather: {w['temp']}C {w['desc']}
-Energy: {energy}/10
 
-HEALTH CONDITIONS (MUST RESPECT):
-{health_context if health_context else 'None'}
-AVOID these herbs/foods: {avoid_herbs if avoid_herbs else 'None'}
-PREFER these herbs: {recommend_herbs if recommend_herbs else 'Any matching dosha'}
-
-Dosha herbs: {herbs_text}
+                        with st.spinner("🤖 Generating recipes..."):
+                            recipes = ai(f"""Tamil chef. LOCAL recipes. Dosha: {dosha['primary_dosha']} ({dosha['dosha_percent']}%), Location: {pin_info[1] if pin_info else sel_dist} ({specific_land}), Season: {ts[1]}, Weather: {w['temp']}C, Energy: {energy}/10
+Health: {health_ctx}. AVOID: {avoid}. PREFER: {recommend}
+Herbs: {herbs_text}
 Local flora: {flora_text}
-
-CRITICAL: Recipes MUST be safe for user's health conditions. Flag any concerns.
-
-Return JSON: {{"breakfast":{{"name":"X","ingredients":"X","prep_time":"15min","medicinal_herbs":"X","herb_preparation":"X","why_local":"Why from this land","why_seasonal":"Why this season","health_safety":"Safe for conditions or warnings","nutritional_benefits":"X","dosha_fit":"X"}},"lunch":{{"name":"X","ingredients":"X","prep_time":"20min","medicinal_herbs":"X","herb_preparation":"X","why_local":"X","why_seasonal":"X","health_safety":"X","nutritional_benefits":"X","dosha_fit":"X"}},"dinner":{{"name":"X","ingredients":"X","prep_time":"15min","medicinal_herbs":"X","herb_preparation":"X","why_local":"X","why_seasonal":"X","health_safety":"X","nutritional_benefits":"X","dosha_fit":"X"}},"health_warnings":"Any specific warnings for this user","wellness_notes":"Overall benefits"}}""")
-                            
+Return JSON: {{"breakfast":{{"name":"X","ingredients":"X","prep_time":"15min","medicinal_herbs":"X","herb_preparation":"X","why_local":"X","why_seasonal":"X","health_safety":"X","nutritional_benefits":"X","dosha_fit":"X"}},"lunch":{{"name":"X","ingredients":"X","prep_time":"20min","medicinal_herbs":"X","herb_preparation":"X","why_local":"X","why_seasonal":"X","health_safety":"X","nutritional_benefits":"X","dosha_fit":"X"}},"dinner":{{"name":"X","ingredients":"X","prep_time":"15min","medicinal_herbs":"X","herb_preparation":"X","why_local":"X","why_seasonal":"X","health_safety":"X","nutritional_benefits":"X","dosha_fit":"X"}},"wellness_notes":"X"}}""")
                             if recipes:
                                 for meal,mi in [("breakfast","☀️"),("lunch","🌞"),("dinner","🌙")]:
-                                    st.markdown("---")
-                                    st.subheader(f"{mi} {meal.title()}")
+                                    st.markdown("---"); st.subheader(f"{mi} {meal.title()}")
                                     st.markdown(f"**{recipes[meal]['name']}**")
-                                    st.write(f"📝 {recipes[meal]['ingredients']}")
-                                    st.write(f"🌿 {recipes[meal]['medicinal_herbs']}")
-                                    st.write(f"🧪 {recipes[meal].get('herb_preparation','')}")
-                                    st.write(f"📍 {recipes[meal].get('why_local','')}")
-                                    st.write(f"🌦️ {recipes[meal].get('why_seasonal','')}")
-                                    st.write(f"💪 {recipes[meal]['nutritional_benefits']}")
+                                    st.write(f"📝 {recipes[meal]['ingredients']}"); st.write(f"🌿 {recipes[meal]['medicinal_herbs']}")
+                                    st.write(f"🧪 {recipes[meal].get('herb_preparation','')}"); st.write(f"📍 {recipes[meal].get('why_local','')}")
+                                    st.write(f"🌦️ {recipes[meal].get('why_seasonal','')}"); st.write(f"💪 {recipes[meal]['nutritional_benefits']}")
                                     hs = recipes[meal].get('health_safety','')
-                                    if hs and 'warning' in hs.lower():
-                                        st.warning(f"⚠️ {hs}")
-                                    elif hs:
-                                        st.success(f"✅ {hs}")
-                                st.markdown("---")
-                                if recipes.get('health_warnings'):
-                                    st.warning(f"⚠️ **Health Note:** {recipes['health_warnings']}")
+                                    if hs: st.success(f"✅ {hs}")
                                 st.info(f"💡 {recipes.get('wellness_notes','')}")
             except Exception as e:
                 st.error(str(e))
@@ -406,21 +316,18 @@ elif page=="👶 Kids":
     col1,col2 = st.columns(2)
     with col1: age = st.selectbox("Age",["2-3","4-6","7-10","11+"])
     with col2: kid_dosha = st.selectbox("Dosha",["Not Sure","Vata","Pitta","Kapha"])
-    
     all_h = get_all_herbs()
     herbs = [{"english":r[0],"tamil":r[1],"uses":r[3],"prep":r[8] if len(r)>8 else "","safe_kids":r[10] if len(r)>10 else True,"min_age":r[11] if len(r)>11 else 2} for r in all_h]
     kid_herbs = [h for h in herbs if h.get('safe_kids',True) and h.get('min_age',2)<=int(age.split("-")[0])]
     local_flora = get_flora(current_land_id, skw)
-    
     if st.button("🤖 Get Local Meal Plan",type="primary"):
         ht = "\n".join([f"- {h['english']}: {h['uses']}" for h in kid_herbs[:8]])
         ft = "\n".join([f"- {f[2]}: {f[6]}" for f in local_flora[:6]])
         with st.spinner("Creating..."):
-            kids = ai(f"""Tamil pediatric nutritionist. Child {age}yr, Dosha {kid_dosha}.
-Location: {pin_info[1] if pin_info else sel_dist} ({specific_land}), Season: {ts[1]}
+            kids = ai(f"""Tamil pediatric nutritionist. Child {age}yr, Dosha {kid_dosha}. Location: {pin_info[1] if pin_info else sel_dist} ({specific_land}), Season: {ts[1]}
 Local flora: {ft}
 Kid herbs: {ht}
-Use LOCAL seasonal ingredients. Return JSON: {{"breakfast":{{"name":"X","ingredients":"X","health_benefits":"X","medicinal_herbs":"X","why_local":"X","why_better_than_junk":"X","taste_profile":"X","prep_time":"15min"}},"lunch":{{"name":"X","ingredients":"X","health_benefits":"X","medicinal_herbs":"X","why_local":"X","why_better_than_junk":"X","taste_profile":"X","prep_time":"20min"}},"dinner":{{"name":"X","ingredients":"X","health_benefits":"X","medicinal_herbs":"X","why_local":"X","why_better_than_junk":"X","taste_profile":"X","prep_time":"15min"}},"parental_guidance":"X"}}""")
+Return JSON: {{"breakfast":{{"name":"X","ingredients":"X","health_benefits":"X","medicinal_herbs":"X","why_local":"X","why_better_than_junk":"X","taste_profile":"X","prep_time":"15min"}},"lunch":{{"name":"X","ingredients":"X","health_benefits":"X","medicinal_herbs":"X","why_local":"X","why_better_than_junk":"X","taste_profile":"X","prep_time":"20min"}},"dinner":{{"name":"X","ingredients":"X","health_benefits":"X","medicinal_herbs":"X","why_local":"X","why_better_than_junk":"X","taste_profile":"X","prep_time":"15min"}},"parental_guidance":"X"}}""")
             if kids:
                 for meal,mi in [("breakfast","☀️"),("lunch","🌞"),("dinner","🌙")]:
                     st.markdown("---"); st.subheader(f"{mi} {meal.title()}")
@@ -452,8 +359,8 @@ elif page=="🏔️ Ainthinai":
                 cur.execute("SELECT flora_type,name_tamil,name_english,medicinal_uses,culinary_uses,dosha_impact FROM land_flora_mapping WHERE land_id=%s",(land[0],))
                 for f in cur.fetchall():
                     ti={"Herb":"🌱","Flower":"🌸","Fruit":"🍎","Tree":"🌳","Grain":"🌾"}.get(f[0],"🌿")
-                    st.write(f"{ti} **{f[2]}** ({f[1]}) | {f[3]} | Cook: {f[4]} | Dosha: {f[5]}")
-                st.markdown("---"); st.subheader("📍 Districts & Pincodes")
+                    st.write(f"{ti} **{f[2]}** ({f[1]}) | {f[3]} | Cook: {f[4]} | {f[5]}")
+                st.markdown("---"); st.subheader("📍 Districts")
                 cur.execute("SELECT district_name,district_tamil FROM district_land_mapping WHERE primary_land=%s ORDER BY district_name",(land[2],))
                 for d in cur.fetchall(): st.write(f"📍 {d[0]} ({d[1]})")
         cur.close();c.close()
@@ -461,7 +368,7 @@ elif page=="🏔️ Ainthinai":
 
 # ==================== SEASONS PAGE ====================
 elif page=="🌦️ Seasons":
-    st.title("🌦️ Tamil Seasons")
+    st.title("🌦️ Tamil Seasons (பெரும்பொழுது)")
     try:
         c=db();cur=c.cursor()
         cur.execute("SELECT * FROM tamil_seasons ORDER BY season_id")
@@ -489,7 +396,7 @@ elif page=="🌿 Herbs":
         if search and search.lower() not in e.lower() and search.lower() not in t.lower(): continue
         if df!="All" and {"Vata":v,"Pitta":pi,"Kapha":k}[df]!="Decrease": continue
         col1,col2=st.columns([1,2])
-        with col1: st.markdown(f"### 🌱 {e}"); st.write(f"**{t}** | {p} | Score: {r[12] or 7}/10")
+        with col1: st.markdown(f"### 🌱 {e}"); st.write(f"**{t}** | {p} | {r[12] or 7}/10")
         with col2: st.write(f"{u} | V:{v} P:{pi} K:{k}")
         st.markdown("---")
 
@@ -529,33 +436,144 @@ elif page=="🔧 Admin":
         col1.metric("🌿 Herbs",h);col2.metric("🍽️ Dishes",r);col3.metric("📋 Logs",l);col4.metric("📮 Pincodes",p)
     except: pass
 
-# ==================== FEEDBACK PAGE ====================
+# ==================== ENHANCED FEEDBACK PAGE ====================
 elif page=="📊 Feedback":
-    st.title("📊 Smart Feedback")
-    with st.form("fb"):
-        col1,col2,col3=st.columns(3)
-        with col1: br=st.slider("Breakfast",1,5,3,key="br")
-        with col2: lr=st.slider("Lunch",1,5,3,key="lr")
-        with col3: dr=st.slider("Dinner",1,5,3,key="dr")
-        energy=st.slider("Energy",1,10,5); digestion=st.selectbox("Digestion",["Good","Normal","Sluggish","Weak"])
-        st.markdown("---"); st.subheader("📝 What Did You Eat?")
-        notes=st.text_area("AI extracts dishes, herbs, vegetables","",height=100)
-        user_id=st.text_input("ID","user_001")
-        if st.form_submit_button("Submit",type="primary"):
+    st.title("📊 Smart Feedback - Track Every Meal")
+    st.markdown("AI parses your meals, analyzes junk food impact, and learns what works")
+
+    with st.form("feedback_detailed"):
+        st.subheader("📍 Your Location")
+        fb_pincode = st.text_input("📮 Pincode","",placeholder="e.g., 625531",key="fbpin")
+        fb_area = ""; fb_weather_loc = ""; fb_land = specific_land
+        if fb_pincode.strip() and len(fb_pincode.strip())==6:
+            api_data = lookup_pincode(fb_pincode.strip())
+            if api_data:
+                fb_area = f"{api_data['area']}, {api_data['district']}"
+                fb_weather_loc = api_data['district']
+                st.success(f"📍 {fb_area}")
             try:
-                c=db();cur=c.cursor()
-                cur.execute("INSERT INTO user_feedback (user_id,recommendation_date,feedback_date,breakfast_rating,lunch_rating,dinner_rating,energy_level_next_day,digestion_quality) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",(user_id,date.today(),date.today(),br,lr,dr,energy,digestion))
-                c.commit();st.success("✅ Saved!")
-                if notes.strip():
-                    with st.spinner("🤖 Parsing..."):
-                        parsed=ai(f"""Parse: "{notes}". Return JSON: {{"dish_name":"X","vegetables":["v1"],"herbs":["h1"],"spices":["s1"],"dosha_assessment":"X","health_benefits":"X"}}""")
-                        if parsed:
-                            st.write(f"🍽️ **Dish:** {parsed.get('dish_name','')}"); st.write(f"🥬 **Veg:** {', '.join(parsed.get('vegetables',[]))}")
-                            st.write(f"🌿 **Herbs:** {', '.join(parsed.get('herbs',[]))}"); st.write(f"⚖️ **Dosha:** {parsed.get('dosha_assessment','')}")
-                            try:
-                                cur.execute("INSERT INTO feedback_parsed_items (user_id,original_note,parsed_dish_name,parsed_herbs,parsed_vegetables,dosha_assessment) VALUES (%s,%s,%s,%s,%s,%s)",
-                                    (user_id,notes,parsed.get('dish_name',''),json.dumps(parsed.get('herbs',[])),json.dumps(parsed.get('vegetables',[])),parsed.get('dosha_assessment','')))
-                                c.commit();st.success("✅ Parsed & saved!")
-                            except: pass
-                cur.close();c.close()
-            except Exception as e: st.error(str(e))
+                conn=db();cur=conn.cursor()
+                cur.execute("SELECT specific_land FROM pincode_land_mapping WHERE pincode=%s",(fb_pincode.strip(),))
+                lr=cur.fetchone();cur.close();conn.close()
+                if lr: fb_land=lr[0]
+            except: pass
+        else:
+            fb_area = pin_info[1] if pin_info else sel_dist
+            fb_weather_loc = weather_loc
+
+        st.markdown("---")
+        st.subheader("☀️ Morning (Breakfast)")
+        morning_notes = st.text_area("What you ate & WHY:","",height=80,key="mn",placeholder="Had thulasi kadaisal for running nose, kanji with inji for cold")
+        col1,col2 = st.columns(2)
+        with col1: morning_rating = st.slider("Rating",1,5,3,key="mr")
+        with col2: morning_helped = st.selectbox("Did it help?",["Yes","Partially","No","Not for health"],key="mh")
+
+        st.markdown("---")
+        st.subheader("🌞 Afternoon (Lunch)")
+        afternoon_notes = st.text_area("What you ate & WHY:","",height=80,key="an",placeholder="Manathakkali sambar with rice for stomach pain. Carrot poriyal.")
+        col1,col2 = st.columns(2)
+        with col1: afternoon_rating = st.slider("Rating",1,5,3,key="ar")
+        with col2: afternoon_helped = st.selectbox("Did it help?",["Yes","Partially","No","Not for health"],key="ah")
+
+        st.markdown("---")
+        st.subheader("🌙 Evening (Dinner)")
+        evening_notes = st.text_area("What you ate & WHY:","",height=80,key="en",placeholder="Ragi porridge with honey and ghee for weakness and body pain")
+        col1,col2 = st.columns(2)
+        with col1: evening_rating = st.slider("Rating",1,5,3,key="er")
+        with col2: evening_helped = st.selectbox("Did it help?",["Yes","Partially","No","Not for health"],key="eh")
+
+        st.markdown("---")
+        st.subheader("🍟 Snacks & Junk Food")
+        st.markdown("⚠️ **Be honest!** AI shows health impact and Tamil alternatives")
+        junk_notes = st.text_area("Junk/snacks you or family had:","",height=80,key="jn",placeholder="Chips at 11am, pepsi with lunch, kids had kurkure and frooti")
+
+        st.markdown("---")
+        st.subheader("📊 Overall")
+        col1,col2,col3,col4 = st.columns(4)
+        with col1: fb_energy = st.slider("Energy",1,10,5,key="fe")
+        with col2: fb_digestion = st.selectbox("Digestion",["Good","Normal","Sluggish","Weak"],key="fd")
+        with col3: fb_sleep = st.selectbox("Sleep",["Good","Normal","Disturbed","Poor"],key="fsl")
+        with col4: fb_mood = st.selectbox("Mood",["Happy","Normal","Tired","Irritable","Stressed"],key="fmo")
+
+        fb_user_id = st.text_input("Your ID","user_001",key="fuid")
+        submitted = st.form_submit_button("🤖 Submit, Parse & Analyze",type="primary")
+
+        if submitted:
+            fb_ts = tamil_season()
+            fb_w = get_weather(fb_weather_loc) if fb_weather_loc else w
+            all_notes = f"Morning: {morning_notes}\nAfternoon: {afternoon_notes}\nEvening: {evening_notes}"
+            has_meals = morning_notes.strip() or afternoon_notes.strip() or evening_notes.strip()
+            has_junk = junk_notes.strip()
+
+            meal_results = {}
+            if has_meals:
+                with st.spinner("🤖 Parsing meals..."):
+                    for slot,notes_text,rating,helped in [("morning",morning_notes,morning_rating,morning_helped),("afternoon",afternoon_notes,afternoon_rating,afternoon_helped),("evening",evening_notes,evening_rating,evening_helped)]:
+                        if notes_text.strip():
+                            parsed = ai(f"""Tamil food analyst. Parse meal: "{notes_text}". Time: {slot}. Location: {fb_area} ({fb_land}). Season: {fb_ts[1]}.
+Return JSON: {{"dishes":[{{"name":"Dish","dish_type":"Type","vegetables":["v"],"leaves_greens":["l"],"herbs":["h"],"spices":["s"],"grains":["g"],"symptom_treated":"Symptom or empty","symptom_dosha":"Dosha or empty"}}],"overall_dosha_impact":"Impact","ai_note":"Siddha insight"}}""")
+                            meal_results[slot] = parsed
+
+            junk_result = None; junk_count = 0
+            if has_junk:
+                with st.spinner("🤖 Analyzing junk impact..."):
+                    junk_result = ai(f"""Nutritionist. Junk: "{junk_notes}". User also ate: {all_notes}. Location: {fb_area} ({fb_land}).
+Return JSON: {{"items":[{{"name":"Item","calories":"est","sugar_g":"est","sodium_mg":"est","harmful_chemicals":"list","dosha_impact":"impact","healing_interference":"how it reduces healthy food","consumed_by":"Adult/Kids/Both","tamil_alternative":"healthy replacement","alternative_benefit":"why better"}}],"total_junk_count":3,"daily_health_reduction_percent":35,"kids_impact":"impact on children","overall_message":"summary"}}""")
+                    if junk_result: junk_count = junk_result.get('total_junk_count',0)
+
+            meal_count = sum(1 for s in ["morning","afternoon","evening"] if s in meal_results)
+            helped_count = sum(1 for h in [morning_helped,afternoon_helped,evening_helped] if h=="Yes")
+            health_score = min(10,max(1,(meal_count*2)+(helped_count*2)-(junk_count*1)+(fb_energy//3)))
+
+            try:
+                conn=db();cur=conn.cursor()
+                cur.execute("""INSERT INTO feedback_detailed (user_id,feedback_date,pincode,area_name,specific_land,tamil_season,weather_condition,morning_notes,morning_rating,morning_helped,morning_parsed,afternoon_notes,afternoon_rating,afternoon_helped,afternoon_parsed,evening_notes,evening_rating,evening_helped,evening_parsed,junk_notes,junk_parsed,junk_count,energy_level,digestion,sleep_quality,mood,daily_health_score) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    (fb_user_id,date.today(),fb_pincode.strip(),fb_area,fb_land,fb_ts[1],f"{fb_w['temp']}C {fb_w['desc']}",morning_notes,morning_rating,morning_helped,json.dumps(meal_results.get('morning')) if meal_results.get('morning') else None,afternoon_notes,afternoon_rating,afternoon_helped,json.dumps(meal_results.get('afternoon')) if meal_results.get('afternoon') else None,evening_notes,evening_rating,evening_helped,json.dumps(meal_results.get('evening')) if meal_results.get('evening') else None,junk_notes,json.dumps(junk_result) if junk_result else None,junk_count,fb_energy,fb_digestion,fb_sleep,fb_mood,health_score))
+                conn.commit();cur.close();conn.close()
+                st.success("✅ All data saved!")
+            except Exception as e: st.warning(f"Save: {e}")
+
+            st.markdown("---")
+            st.title("🤖 AI Analysis")
+
+            for slot,icon,notes_text,rating,helped in [("morning","☀️",morning_notes,morning_rating,morning_helped),("afternoon","🌞",afternoon_notes,afternoon_rating,afternoon_helped),("evening","🌙",evening_notes,evening_rating,evening_helped)]:
+                if slot in meal_results and meal_results[slot]:
+                    st.markdown("---"); st.subheader(f"{icon} {slot.title()}")
+                    mr = meal_results[slot]
+                    if mr.get('dishes'):
+                        for dish in mr['dishes']:
+                            st.markdown(f"**📌 {dish.get('name','')}** ({dish.get('dish_type','')})")
+                            parts = []
+                            if dish.get('vegetables'): parts.append(f"🥬 Veg: {', '.join(dish['vegetables'])}")
+                            if dish.get('leaves_greens'): parts.append(f"🌿 Leaves: {', '.join(dish['leaves_greens'])}")
+                            if dish.get('herbs'): parts.append(f"🌱 Herbs: {', '.join(dish['herbs'])}")
+                            if dish.get('spices'): parts.append(f"🌶️ Spices: {', '.join(dish['spices'])}")
+                            if dish.get('grains'): parts.append(f"🌾 Grains: {', '.join(dish['grains'])}")
+                            for p in parts: st.write(p)
+                            if dish.get('symptom_treated'): st.write(f"🤒 **For:** {dish['symptom_treated']} ({dish.get('symptom_dosha','')})")
+                            eff={"Yes":"✅","Partially":"⚠️","No":"❌"}.get(helped,"ℹ️")
+                            st.write(f"{eff} Helped: {helped} | {'⭐'*rating}")
+                    if mr.get('ai_note'): st.info(f"💡 {mr['ai_note']}")
+
+            if junk_result and junk_result.get('items'):
+                st.markdown("---"); st.subheader("🍟 Junk Food Impact")
+                for item in junk_result['items']:
+                    st.markdown(f"**⚠️ {item.get('name','')}**")
+                    st.write(f"🔥 Cal: ~{item.get('calories','?')} | Sugar: ~{item.get('sugar_g','?')}g | Sodium: ~{item.get('sodium_mg','?')}mg")
+                    if item.get('harmful_chemicals'): st.write(f"☠️ {item['harmful_chemicals']}")
+                    st.write(f"⚖️ Dosha: {item.get('dosha_impact','')}")
+                    if item.get('healing_interference'): st.warning(f"🔄 {item['healing_interference']}")
+                    if item.get('consumed_by') and 'kid' in item.get('consumed_by','').lower(): st.error(f"👶 Extra harmful for children!")
+                    st.success(f"🌿 **Alternative:** {item.get('tamil_alternative','')} → {item.get('alternative_benefit','')}")
+                if junk_result.get('kids_impact'): st.error(f"👶 {junk_result['kids_impact']}")
+                if junk_result.get('daily_health_reduction_percent'): st.warning(f"📉 Junk reduced healing by ~{junk_result['daily_health_reduction_percent']}%")
+                if junk_result.get('overall_message'): st.info(f"💡 {junk_result['overall_message']}")
+
+            st.markdown("---"); st.subheader("📊 Daily Health Score")
+            col1,col2,col3,col4 = st.columns(4)
+            col1.metric("🏥 Score",f"{health_score}/10"); col2.metric("🟢 Meals",f"{meal_count}/3")
+            col3.metric("🔴 Junk",junk_count); col4.metric("⚡ Energy",f"{fb_energy}/10")
+            if health_score>=8: st.success("🌟 Excellent! Traditional meals working well!")
+            elif health_score>=5: st.info("👍 Good! Reduce junk to improve.")
+            else: st.warning("⚠️ Too much junk. Try Tamil snacks tomorrow.")
+            st.success("✅ All feedback saved! AI is learning from your data.")

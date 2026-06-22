@@ -308,11 +308,49 @@ current_land_id=land_id_map.get(specific_land,3);w=get_weather(weather_loc);ts=t
 st.sidebar.markdown("---")
 st.sidebar.markdown(f"🌦️ {ts[0]} | {ts[2]}");st.sidebar.markdown(f"🌤️ {w['temp']}°C | {w['desc']}")
 st.sidebar.markdown("---")
-page=st.sidebar.radio("Navigate",["📝 Food Log","📅 History","🍽️ Foods Found","🏥 Remedies","👨‍🍳 Recommend","👶 Kids","🏔️ Ainthinai","🌦️ Seasons","🌿 Herbs","🔧 Admin"])
+PAGES=["📝 Food Log","📅 History","🍽️ Foods Found","🏥 Remedies","👨‍🍳 Recommend","👶 Kids","🏔️ Ainthinai","🌦️ Seasons","🌿 Herbs","🔧 Admin"]
+if "nav_page" not in st.session_state: st.session_state.nav_page="📝 Food Log"
+page=st.sidebar.radio("Navigate",PAGES,key="nav_page")
 
 # ==================== PAGE 1: FOOD LOG ====================
 if page=="📝 Food Log":
     st.title("📝 Daily Food Log - Train the AI!")
+
+    nav1,nav2,_=st.columns([1,1,4])
+    with nav1:
+        if st.button("🏠 Home",use_container_width=True):
+            st.session_state.nav_page="📝 Food Log"
+            st.rerun()
+    with nav2:
+        if st.button("🔄 Refresh",use_container_width=True):
+            for k in ['basket_morning','basket_afternoon','basket_evening','analyzed_morning','analyzed_afternoon','analyzed_evening']:
+                if k in st.session_state: del st.session_state[k]
+            st.rerun()
+
+    # --- Step 1: Who is this log for? ---
+    st.markdown("#### 👤 Step 1 — Who are you logging for?")
+    fl_users=get_user_profiles()
+    fl_names=[u[0] for u in fl_users]
+    if not fl_names:
+        st.warning("No users yet. Add a user in the sidebar (➕ New User) first.")
+        st.stop()
+    # default to sidebar-selected user if valid, else first
+    default_idx=fl_names.index(current_user) if current_user in fl_names else 0
+    chosen_user=st.selectbox("Select user",fl_names,index=default_idx,key="foodlog_user")
+    # If user switched here, reset that person's context (pincode/land) and clear baskets
+    if chosen_user!=current_user:
+        for ud2 in fl_users:
+            if ud2[0]==chosen_user:
+                current_user=ud2[0];typed_pin=ud2[1] or "";pin_area=ud2[2] or "";pin_district=ud2[3] or "";specific_land=ud2[4] or "Marutham"
+                dp2=get_pincode_land(typed_pin) if typed_pin else None
+                weather_loc=dp2[5] if dp2 else (pin_district or "Chennai")
+                current_land_id=land_id_map.get(specific_land,3)
+                break
+        # clear baskets/analysis when switching person so items don't carry over
+        for k in ['basket_morning','basket_afternoon','basket_evening','analyzed_morning','analyzed_afternoon','analyzed_evening']:
+            if k in st.session_state: del st.session_state[k]
+    st.caption(f"Logging for **{current_user}** · 📍 {pin_area or '—'} ({specific_land})")
+    st.markdown("---")
 
     if current_user and current_user!="guest":
         scores=get_user_scores(current_user)

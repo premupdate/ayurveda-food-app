@@ -158,13 +158,16 @@ def get_food_history(uid,days=14):
     except: return []
 
 def save_discovered_food(fn,ft,user,symptom,dosha,land,season,botanical="",importance="",remediates=""):
-    """Insert or increment a discovered food. Returns (new_count, was_count, is_new)."""
+    """Insert or increment a discovered food (case/space-insensitive match). Returns (new_count, was_count, is_new)."""
     try:
-        c=db();cur=c.cursor();cur.execute("SELECT food_id,times_mentioned,associated_symptoms FROM discovered_foods WHERE food_name=%s",(fn,));ex=cur.fetchone()
+        fn=(fn or "").strip()
+        if not fn: return (None,None,None)
+        c=db();cur=c.cursor()
+        # Match ignoring case and surrounding whitespace; keep the first-seen spelling
+        cur.execute("SELECT food_id,times_mentioned,associated_symptoms FROM discovered_foods WHERE LOWER(TRIM(food_name))=LOWER(TRIM(%s)) LIMIT 1",(fn,));ex=cur.fetchone()
         if ex:
             was=ex[1] or 0;n=was+1;sy=ex[2] or ""
             if symptom and symptom not in sy: sy=f"{sy}, {symptom}" if sy else symptom
-            # Only overwrite botanical/importance/remediates if we have new non-empty values
             if botanical or importance or remediates:
                 cur.execute("""UPDATE discovered_foods SET times_mentioned=%s,associated_symptoms=%s,last_mentioned=%s,
                     botanical_name=COALESCE(NULLIF(%s,''),botanical_name),
@@ -208,6 +211,48 @@ def delete_discovered_food(food_id):
     try:
         c=db();cur=c.cursor();cur.execute("DELETE FROM discovered_foods WHERE food_id=%s",(food_id,));c.commit();cur.close();c.close();return True
     except: return False
+
+def delete_discovered_foods(food_ids):
+    """Delete many foods by id list. Returns count deleted."""
+    if not food_ids: return 0
+    try:
+        c=db();cur=c.cursor();cur.execute("DELETE FROM discovered_foods WHERE food_id = ANY(%s)",(list(food_ids),));n=cur.rowcount;c.commit();cur.close();c.close();return n
+    except: return 0
+
+def merge_duplicate_foods():
+    """Merge rows whose names match after lower+trim. Keep earliest (smallest food_id),
+    sum times_mentioned, keep any non-empty botanical/importance/remediates. Returns (groups_merged, rows_removed)."""
+    try:
+        c=db();cur=c.cursor()
+        cur.execute("SELECT food_id,food_name,times_mentioned,botanical_name,plant_importance,remediates,associated_symptoms FROM discovered_foods ORDER BY food_id")
+        rows=cur.fetchall()
+        groups={}
+        for r in rows:
+            key=(r[1] or "").strip().lower()
+            groups.setdefault(key,[]).append(r)
+        groups_merged=0;rows_removed=0
+        for key,items in groups.items():
+            if len(items)<2: continue
+            keep=items[0]  # smallest id
+            total=sum((it[2] or 0) for it in items)
+            bot=next((it[3] for it in items if it[3]),keep[3])
+            imp=next((it[4] for it in items if it[4]),keep[4])
+            rem=next((it[5] for it in items if it[5]),keep[5])
+            syms=set()
+            for it in items:
+                if it[6]:
+                    for s in str(it[6]).split(','):
+                        if s.strip(): syms.add(s.strip())
+            sym_str=", ".join(sorted(syms)) if syms else keep[6]
+            cur.execute("UPDATE discovered_foods SET times_mentioned=%s,botanical_name=%s,plant_importance=%s,remediates=%s,associated_symptoms=%s WHERE food_id=%s",
+                        (total,bot,imp,rem,sym_str,keep[0]))
+            dup_ids=[it[0] for it in items[1:]]
+            cur.execute("DELETE FROM discovered_foods WHERE food_id = ANY(%s)",(dup_ids,))
+            groups_merged+=1;rows_removed+=len(dup_ids)
+        c.commit();cur.close();c.close()
+        return (groups_merged,rows_removed)
+    except Exception:
+        return (0,0)
 
 def update_food_botanical(food_id,botanical,importance,remediates):
     """Fill the 3 new columns for one food by id."""
@@ -717,23 +762,30 @@ elif page=="🔧 Admin":
             st.success("🎉 All plant foods already have botanical names!")
     elif tab=="🗑️ Manage Foods":
         st.subheader("🗑️ Manage / Delete Foods")
-        st.caption("Remove wrong or duplicate entries from the discovered foods database.")
+        st.caption("Remove wrong/duplicate entries, or merge same-name duplicates (case differences).")
+
+        # Merge duplicates
+        st.markdown("**🔀 Merge duplicates** (same name, different case/spacing)")
+        if st.button("🔀 Merge duplicate foods now"):
+            g,rm=merge_duplicate_foods()
+            if g: st.success(f"Merged {g} duplicate group(s), removed {rm} extra row(s). Refresh to see.")
+            else: st.info("No duplicates found.")
+        st.markdown("---")
+
         allfoods=get_all_discovered_foods()
         if not allfoods:
             st.info("No discovered foods yet.")
         else:
             st.write(f"**{len(allfoods)} foods** in database.")
             ticon={"Dish":"🍽️","Vegetable":"🥬","Leaf/Green":"🌿","Herb":"🌱","Grain":"🌾","Spice":"🌶️"}
-            labels=[f"{ticon.get(a[2],'🍽️')} {a[1]}  ({a[2]}, {a[4]}x)" for a in allfoods]
-            sel=st.selectbox("Pick a food to inspect/delete",range(len(labels)),format_func=lambda i:labels[i])
-            chosen=allfoods[sel]
-            st.markdown(f"**{chosen[1]}** — type: {chosen[2]} | botanical: *{chosen[3] or 'n/a'}* | mentioned {chosen[4]}x")
-            confirm=st.checkbox(f"Yes, permanently delete '{chosen[1]}'",key="confirm_del")
-            if st.button("🗑️ Delete this food",type="primary",disabled=not confirm):
-                if delete_discovered_food(chosen[0]):
-                    st.success(f"Deleted '{chosen[1]}'. Refresh to update the list.")
-                else:
-                    st.error("Could not delete. Try again.")
+            labels={a[0]:f"{ticon.get(a[2],'🍽️')} {a[1]}  ({a[2]}, {a[4]}x)" for a in allfoods}
+            picked=st.multiselect("Select one or more foods to delete",options=[a[0] for a in allfoods],format_func=lambda fid:labels.get(fid,str(fid)))
+            if picked:
+                st.warning(f"{len(picked)} food(s) selected for deletion.")
+                confirm=st.checkbox("Yes, permanently delete the selected foods",key="confirm_multidel")
+                if st.button("🗑️ Delete selected",type="primary",disabled=not confirm):
+                    n=delete_discovered_foods(picked)
+                    st.success(f"Deleted {n} food(s). Refresh to update the list.")
     st.markdown("---")
     try:
         c=db();cur=c.cursor()

@@ -26,25 +26,45 @@ gm = genai.GenerativeModel('gemini-2.5-flash')
 def db():
     return psycopg2.connect(host=os.getenv('SUPABASE_HOST'),database=os.getenv('SUPABASE_DB'),port=os.getenv('SUPABASE_PORT'),user=os.getenv('SUPABASE_USER'),password=os.getenv('SUPABASE_PASSWORD'))
 
-def ai(prompt):
-    try:
-        r = gm.generate_content(prompt)
-        if not r or not r.text: return None
-        t = r.text.strip()
+def ai(prompt, debug=False):
+    """Return parsed JSON dict, or None. If debug=True, returns (result, error_string)."""
+    last_err = ""
+    def extract_json(text):
+        if not text: return None
+        t = text.strip()
         if "```json" in t: t = t.split("```json")[1].split("```")[0]
         elif "```" in t: t = t.split("```")[1].split("```")[0]
         t = t.strip()
         if not t: return None
-        return json.loads(t)
-    except json.JSONDecodeError:
         try:
-            r2 = gm.generate_content(prompt + "\n\nCRITICAL: Return ONLY valid JSON.")
-            t2 = r2.text.strip()
-            if "```json" in t2: t2 = t2.split("```json")[1].split("```")[0]
-            elif "```" in t2: t2 = t2.split("```")[1].split("```")[0]
-            return json.loads(t2.strip())
-        except: return None
-    except: return None
+            return json.loads(t)
+        except json.JSONDecodeError:
+            # fallback: grab the outermost { ... } block
+            if "{" in t and "}" in t:
+                t2 = t[t.find("{"): t.rfind("}")+1]
+                return json.loads(t2)
+            raise
+    try:
+        r = gm.generate_content(prompt)
+        if not r or not getattr(r, "text", None):
+            last_err = "Empty response from model"
+            return (None, last_err) if debug else None
+        res = extract_json(r.text)
+        if res is not None:
+            return (res, "") if debug else res
+        last_err = "No JSON in response"
+    except json.JSONDecodeError as e:
+        last_err = f"JSON parse failed: {e}"
+        try:
+            r2 = gm.generate_content(prompt + "\n\nCRITICAL: Return ONLY valid JSON. No prose, no markdown.")
+            res2 = extract_json(r2.text)
+            if res2 is not None:
+                return (res2, "") if debug else res2
+        except Exception as e2:
+            last_err = f"Retry failed: {e2}"
+    except Exception as e:
+        last_err = f"{type(e).__name__}: {e}"
+    return (None, last_err) if debug else None
 
 def speak(text, lang='en'):
     try:
@@ -470,9 +490,12 @@ if page=="📝 Food Log":
                     '"remediates":"Conditions/symptoms it helps (comma separated)","vegetables":[],"leaves_greens":[],'
                     '"herbs":[],"grains":[],"spices":[],"symptom_dosha":"Vata/Pitta/Kapha or empty"}'
                 )
-                res = ai(prompt)
+                res, err = ai(prompt, debug=True)
             if res: st.session_state[akey] = res
-            else: st.warning("AI couldn't analyze. Check spelling or try again.")
+            else:
+                st.warning("AI couldn't analyze this item.")
+                if err: st.caption(f"Reason: {err}")
+                st.caption("Tip: if every food fails, it's usually the Gemini API key or quota — check Admin or your secrets.")
 
         if akey in st.session_state and st.session_state[akey]:
             res = st.session_state[akey]
@@ -774,7 +797,7 @@ elif page=="🌿 Herbs":
 # ==================== PAGE 10: ADMIN ====================
 elif page=="🔧 Admin":
     st.title("🔧 Admin")
-    tab=st.radio("",["🌿 Herb","🍽️ Dish","👤 Users","🧬 Backfill Botanical","🗑️ Manage Foods"])
+    tab=st.radio("",["🌿 Herb","🍽️ Dish","👤 Users","🧬 Backfill Botanical","🗑️ Manage Foods","🧪 AI Test"])
     if tab=="🌿 Herb":
         with st.form("herb"):
             col1,col2=st.columns(2)
@@ -847,6 +870,19 @@ elif page=="🔧 Admin":
                 if st.button("🗑️ Delete selected",type="primary",disabled=not confirm):
                     n=delete_discovered_foods(picked)
                     st.success(f"Deleted {n} food(s). Refresh to update the list.")
+    elif tab=="🧪 AI Test":
+        st.subheader("🧪 Test the AI connection")
+        st.caption("Use this to check if the Gemini API key/model works, separate from food parsing.")
+        if st.button("Run test",type="primary"):
+            with st.spinner("Calling Gemini..."):
+                res, err = ai('Return ONLY this JSON: {"ok": true, "plant": "Tulasi", "botanical": "Ocimum sanctum"}', debug=True)
+            if res:
+                st.success("✅ AI is working!")
+                st.json(res)
+            else:
+                st.error("❌ AI call failed.")
+                st.write(f"**Reason:** {err}")
+                st.markdown("Common causes: expired/invalid `GEMINI_API_KEY`, daily quota exhausted, or wrong model name. Check your Streamlit secrets.")
     st.markdown("---")
     try:
         c=db();cur=c.cursor()

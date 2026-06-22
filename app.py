@@ -192,6 +192,22 @@ def get_food_details(food_name):
         c=db();cur=c.cursor();cur.execute("SELECT food_name,food_type,botanical_name,plant_importance,remediates,times_mentioned,associated_symptoms FROM discovered_foods WHERE food_name=%s",(food_name,));r=cur.fetchone();cur.close();c.close();return r
     except: return None
 
+def get_foods_missing_botanical():
+    """Return [(food_id, food_name, food_type)] for foods with no botanical name yet."""
+    try:
+        c=db();cur=c.cursor();cur.execute("SELECT food_id,food_name,food_type FROM discovered_foods WHERE botanical_name IS NULL OR botanical_name='' ORDER BY food_id");r=cur.fetchall();cur.close();c.close();return r
+    except: return []
+
+def update_food_botanical(food_id,botanical,importance,remediates):
+    """Fill the 3 new columns for one food by id."""
+    try:
+        c=db();cur=c.cursor();cur.execute("""UPDATE discovered_foods SET
+            botanical_name=COALESCE(NULLIF(%s,''),botanical_name),
+            plant_importance=COALESCE(NULLIF(%s,''),plant_importance),
+            remediates=COALESCE(NULLIF(%s,''),remediates) WHERE food_id=%s""",
+            (botanical,importance,remediates,food_id));c.commit();cur.close();c.close();return True
+    except: return False
+
 def save_remedy(food,ingr,symptom,dosha,land,season,helped):
     if not symptom or not food: return
     try:
@@ -635,7 +651,7 @@ elif page=="🌿 Herbs":
 # ==================== PAGE 10: ADMIN ====================
 elif page=="🔧 Admin":
     st.title("🔧 Admin")
-    tab=st.radio("",["🌿 Herb","🍽️ Dish","👤 Users"])
+    tab=st.radio("",["🌿 Herb","🍽️ Dish","👤 Users","🧬 Backfill Botanical"])
     if tab=="🌿 Herb":
         with st.form("herb"):
             col1,col2=st.columns(2)
@@ -654,6 +670,34 @@ elif page=="🔧 Admin":
                 except Exception as e: st.error(str(e))
     elif tab=="👤 Users":
         for u in get_user_profiles(): st.write(f"👤 **{u[0]}** | 📮 {u[1]} | 📍 {u[2]}, {u[3]} | {land_icons.get(u[4],'🌍')} {u[4]}")
+    elif tab=="🧬 Backfill Botanical":
+        st.subheader("🧬 Backfill Botanical Names")
+        missing=get_foods_missing_botanical()
+        st.write(f"**{len(missing)} foods** are missing a botanical name.")
+        if missing:
+            with st.expander("See the list"):
+                for m in missing: st.write(f"• {m[1]} ({m[2]})")
+            st.caption("This asks AI to identify the key plant for each food and fills botanical name, importance, and what it remediates. For mixed dishes it uses the hero medicinal ingredient. Runs ~1 food/second. You can edit any value later in the verify flow.")
+            colA,colB=st.columns(2)
+            with colA: batch=st.number_input("How many to process now?",1,len(missing),min(len(missing),25))
+            with colB: st.write("");st.write("")
+            if st.button(f"🚀 Backfill {batch} foods now",type="primary"):
+                prog=st.progress(0.0);done=0;filled=0;log_area=st.empty()
+                for idx,(fid,fname,ftype) in enumerate(missing[:batch]):
+                    prompt=('Tamil Siddha food & botany expert. Food: "'+fname+'" (type: '+(ftype or 'Dish')+'). '
+                            'Identify the MAIN medicinal plant/ingredient (for a mixed dish use its hero ingredient). '
+                            'Return ONLY JSON: {"botanical_name":"Latin name","plant_importance":"why it matters in Siddha/Ayurveda (1-2 sentences)","remediates":"conditions it helps, comma separated"}')
+                    res=ai(prompt)
+                    if res and res.get('botanical_name'):
+                        ok=update_food_botanical(fid,res.get('botanical_name',''),res.get('plant_importance',''),res.get('remediates',''))
+                        if ok: filled+=1
+                        log_area.write(f"✅ {fname} → *{res.get('botanical_name','')}*")
+                    else:
+                        log_area.write(f"⚠️ {fname} → could not identify (skipped)")
+                    done+=1;prog.progress(done/batch)
+                st.success(f"Done! Filled {filled} of {done} processed. {len(missing)-done} still remaining — run again to continue.")
+        else:
+            st.success("🎉 All foods already have botanical names!")
     st.markdown("---")
     try:
         c=db();cur=c.cursor()

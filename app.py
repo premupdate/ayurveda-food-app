@@ -157,16 +157,40 @@ def get_food_history(uid,days=14):
         c=db();cur=c.cursor();cur.execute("SELECT feedback_date,morning_notes,morning_rating,morning_helped,afternoon_notes,afternoon_rating,afternoon_helped,evening_notes,evening_rating,evening_helped,junk_notes,junk_count,daily_health_score,energy_level,digestion,sleep_quality,mood,specific_land,tamil_season,weather_condition FROM feedback_detailed WHERE user_id=%s AND feedback_date>=%s ORDER BY feedback_date DESC",(uid,date.today()-timedelta(days=days)));r=cur.fetchall();cur.close();c.close();return r
     except: return []
 
-def save_discovered_food(fn,ft,user,symptom,dosha,land,season):
+def save_discovered_food(fn,ft,user,symptom,dosha,land,season,botanical="",importance="",remediates=""):
+    """Insert or increment a discovered food. Returns (new_count, was_count, is_new)."""
     try:
         c=db();cur=c.cursor();cur.execute("SELECT food_id,times_mentioned,associated_symptoms FROM discovered_foods WHERE food_name=%s",(fn,));ex=cur.fetchone()
         if ex:
-            n=ex[1]+1;sy=ex[2] or ""
+            was=ex[1] or 0;n=was+1;sy=ex[2] or ""
             if symptom and symptom not in sy: sy=f"{sy}, {symptom}" if sy else symptom
-            cur.execute("UPDATE discovered_foods SET times_mentioned=%s,associated_symptoms=%s,last_mentioned=%s WHERE food_id=%s",(n,sy,date.today(),ex[0]))
-        else: cur.execute("INSERT INTO discovered_foods (food_name,food_type,discovered_by,associated_symptoms,dosha_assessment,land_discovered,season_discovered) VALUES (%s,%s,%s,%s,%s,%s,%s)",(fn,ft,user,symptom,dosha,land,season))
-        c.commit();cur.close();c.close()
-    except: pass
+            # Only overwrite botanical/importance/remediates if we have new non-empty values
+            if botanical or importance or remediates:
+                cur.execute("""UPDATE discovered_foods SET times_mentioned=%s,associated_symptoms=%s,last_mentioned=%s,
+                    botanical_name=COALESCE(NULLIF(%s,''),botanical_name),
+                    plant_importance=COALESCE(NULLIF(%s,''),plant_importance),
+                    remediates=COALESCE(NULLIF(%s,''),remediates) WHERE food_id=%s""",
+                    (n,sy,date.today(),botanical,importance,remediates,ex[0]))
+            else:
+                cur.execute("UPDATE discovered_foods SET times_mentioned=%s,associated_symptoms=%s,last_mentioned=%s WHERE food_id=%s",(n,sy,date.today(),ex[0]))
+            c.commit();cur.close();c.close();return (n,was,False)
+        else:
+            cur.execute("INSERT INTO discovered_foods (food_name,food_type,discovered_by,associated_symptoms,dosha_assessment,land_discovered,season_discovered,botanical_name,plant_importance,remediates) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",(fn,ft,user,symptom,dosha,land,season,botanical,importance,remediates))
+            c.commit();cur.close();c.close();return (1,0,True)
+    except Exception:
+        return (None,None,None)
+
+def get_foods_by_type(food_type):
+    """Return list of (food_name, botanical_name, times_mentioned, remediates) for a given type."""
+    try:
+        c=db();cur=c.cursor();cur.execute("SELECT food_name,botanical_name,times_mentioned,remediates FROM discovered_foods WHERE food_type=%s ORDER BY food_name",(food_type,));r=cur.fetchall();cur.close();c.close();return r
+    except: return []
+
+def get_food_details(food_name):
+    """Return stored details for a single food."""
+    try:
+        c=db();cur=c.cursor();cur.execute("SELECT food_name,food_type,botanical_name,plant_importance,remediates,times_mentioned,associated_symptoms FROM discovered_foods WHERE food_name=%s",(food_name,));r=cur.fetchone();cur.close();c.close();return r
+    except: return None
 
 def save_remedy(food,ingr,symptom,dosha,land,season,helped):
     if not symptom or not food: return
@@ -260,116 +284,146 @@ if page=="📝 Food Log":
                 else:
                     st.warning("Could not transcribe. Please try again or type manually.")
 
-    # Food log form
+    # ===== NEW: Per-meal Analyze -> Verify -> Add flow (Option A) =====
     vm=st.session_state.get('voice_morning','');va=st.session_state.get('voice_afternoon','');ve=st.session_state.get('voice_evening','');vj=st.session_state.get('voice_junk','')
 
-    with st.form("food_log"):
-        st.subheader("☀️ Morning")
-        mn=st.text_area("What & why:",vm,height=60,key="mn",placeholder="Thulasi kadaisal for running nose")
-        col1,col2=st.columns(2)
-        with col1: mr=st.slider("Rating",1,5,3,key="mr")
-        with col2: mh=st.selectbox("Helped?",["Yes","Partially","No","Not for health"],key="mh")
+    st.markdown("Add each item you ate. Pick from existing foods, or type a new one for AI to analyze and verify before saving.")
 
-        st.markdown("---");st.subheader("🌞 Afternoon")
-        an=st.text_area("What & why:",va,height=60,key="an",placeholder="Manathakkali sambar for stomach")
-        col1,col2=st.columns(2)
-        with col1: ar=st.slider("Rating",1,5,3,key="ar")
-        with col2: ah=st.selectbox("Helped?",["Yes","Partially","No","Not for health"],key="ah")
+    TYPE_OPTIONS = ["Dish","Vegetable","Leaf/Green","Herb","Grain","Spice"]
 
-        st.markdown("---");st.subheader("🌙 Evening")
-        en=st.text_area("What & why:",ve,height=60,key="en",placeholder="Ragi porridge for weakness")
-        col1,col2=st.columns(2)
-        with col1: er=st.slider("Rating",1,5,3,key="er")
-        with col2: eh=st.selectbox("Helped?",["Yes","Partially","No","Not for health"],key="eh")
+    def meal_item_widget(slot, icon, default_text):
+        st.markdown(f"### {icon} {slot.title()}")
+        note = st.text_area(f"{slot.title()} note (what & why):", default_text, height=60,
+                            key=f"note_{slot}", placeholder="e.g. Seenthil kadaisal for fever")
+        ftype = st.selectbox("Food type", TYPE_OPTIONS, key=f"ftype_{slot}")
+        existing = get_foods_by_type(ftype)
+        existing_names = [e[0] for e in existing]
+        dropdown = ["+ Type new food"] + existing_names
+        choice = st.selectbox(f"Pick existing {ftype.lower()} or add new", dropdown, key=f"pick_{slot}")
+        akey = f"analyzed_{slot}"
 
-        st.markdown("---");st.subheader("🍟 Snacks & Junk")
-        jn=st.text_area("Junk food:",vj,height=60,key="jn",placeholder="Chips, pepsi, kurkure")
+        if choice != "+ Type new food":
+            det = get_food_details(choice)
+            if det:
+                st.info(f"**{det[0]}** | *{det[2] or 'botanical n/a'}* | mentioned {det[5]}x")
+                if det[4]: st.write(f"Remediates: {det[4]}")
+                if det[3]: st.write(f"Importance: {det[3]}")
+            if st.button(f"Add this {ftype.lower()}", key=f"addexist_{slot}"):
+                n,was,isnew = save_discovered_food(choice,ftype,current_user,"","",specific_land,ts[1])
+                if n is not None:
+                    st.success(f"'{choice}' added! Now mentioned {n} times (was {was}).")
+                else:
+                    st.warning("Could not save. Try again.")
+            return
 
-        st.markdown("---")
-        col1,col2,col3,col4=st.columns(4)
-        with col1: fe=st.slider("Energy",1,10,5,key="fe")
-        with col2: fd=st.selectbox("Digestion",["Good","Normal","Sluggish","Weak"],key="fd")
-        with col3: fsl=st.selectbox("Sleep",["Good","Normal","Disturbed","Poor"],key="fsl")
-        with col4: fmo=st.selectbox("Mood",["Happy","Normal","Tired","Irritable"],key="fmo")
+        new_name = st.text_input(f"Type the {ftype.lower()} name", key=f"new_{slot}",
+                                 placeholder="e.g. Seenthil kadaisal")
+        col_a, col_b = st.columns(2)
+        with col_a:
+            analyze = st.button("Analyze", key=f"analyze_{slot}")
+        with col_b:
+            clear = st.button("Clear", key=f"clear_{slot}")
+        if clear and akey in st.session_state:
+            del st.session_state[akey]
 
-        if st.form_submit_button("🤖 Submit & Learn",type="primary"):
-            has_meals=mn.strip() or an.strip() or en.strip();has_junk=jn.strip()
-            meal_results={}
-            if has_meals:
-                with st.spinner("🤖 Parsing..."):
-                    for slot,txt,rating,helped in [("morning",mn,mr,mh),("afternoon",an,ar,ah),("evening",en,er,eh)]:
-                        if txt.strip():
-                            p=ai(f"""Tamil food analyst. Parse: "{txt}". Location: {pin_area} ({specific_land}). Season: {ts[1]}. Return JSON: {{"dishes":[{{"name":"Dish","dish_type":"Type","vegetables":["v"],"leaves_greens":["l"],"herbs":["h"],"spices":["s"],"grains":["g"],"symptom_treated":"Symptom","symptom_dosha":"Dosha"}}],"ai_note":"Insight"}}""")
-                            meal_results[slot]=p
-                            if p and p.get('dishes'):
-                                for dish in p['dishes']:
-                                    dn=dish.get('name','')
-                                    if dn:
-                                        save_discovered_food(dn,"Dish",current_user,dish.get('symptom_treated',''),dish.get('symptom_dosha',''),specific_land,ts[1])
-                                        if dish.get('symptom_treated'): save_remedy(dn,", ".join(dish.get('herbs',[])+dish.get('leaves_greens',[])),dish['symptom_treated'],dish.get('symptom_dosha',''),specific_land,ts[1],helped)
-                                    for v in dish.get('vegetables',[]): save_discovered_food(v,"Vegetable",current_user,"","",specific_land,ts[1])
-                                    for l in dish.get('leaves_greens',[]): save_discovered_food(l,"Leaf/Green",current_user,"","",specific_land,ts[1])
-                                    for h in dish.get('herbs',[]): save_discovered_food(h,"Herb",current_user,"","",specific_land,ts[1])
-                                    for g in dish.get('grains',[]): save_discovered_food(g,"Grain",current_user,"","",specific_land,ts[1])
+        if analyze and new_name.strip():
+            with st.spinner("Analyzing & identifying botanical name..."):
+                prompt = (
+                    'Tamil Siddha food & botany expert. The user ate: "' + new_name.strip() +
+                    '" (type: ' + ftype + '). Identify the MAIN plant/ingredient and give scientific details. '
+                    'Return ONLY JSON: {"clean_name":"Cleaned food name","key_plant_tamil":"Tamil/common name",'
+                    '"botanical_name":"Latin botanical name","plant_importance":"Why this plant matters in Siddha/Ayurveda (1-2 sentences)",'
+                    '"remediates":"Conditions/symptoms it helps (comma separated)","vegetables":[],"leaves_greens":[],'
+                    '"herbs":[],"grains":[],"spices":[],"symptom_dosha":"Vata/Pitta/Kapha or empty"}'
+                )
+                res = ai(prompt)
+            if res:
+                st.session_state[akey] = res
+            else:
+                st.warning("AI couldn't analyze. Check spelling or try again.")
 
-            junk_result=None;junk_count=0
-            if has_junk:
-                with st.spinner("🤖 Junk analysis..."):
-                    junk_result=ai(f"""Nutritionist. Junk: "{jn}". Return JSON: {{"items":[{{"name":"X","dosha_impact":"X","healing_interference":"X","consumed_by":"Adult/Kids/Both","tamil_alternative":"X","alternative_benefit":"X"}}],"total_junk_count":3,"overall_message":"X"}}""")
-                    if junk_result: junk_count=junk_result.get('total_junk_count',0)
+        if akey in st.session_state and st.session_state[akey]:
+            res = st.session_state[akey]
+            st.markdown("#### Verify AI Analysis")
+            ver_name = st.text_input("Food name", res.get('clean_name', new_name), key=f"vername_{slot}")
+            ver_bot = st.text_input("Botanical name", res.get('botanical_name',''), key=f"verbot_{slot}")
+            st.write(f"Key plant: {res.get('key_plant_tamil','')}")
+            if res.get('plant_importance'): st.write(f"Importance: {res['plant_importance']}")
+            if res.get('remediates'): st.success(f"Remediates: {res['remediates']}")
+            extras=[]
+            for k,lbl in [("vegetables","Veg"),("leaves_greens","Leaves"),("herbs","Herbs"),("grains","Grains"),("spices","Spices")]:
+                if res.get(k): extras.append(f"{lbl}: {', '.join(res[k])}")
+            if extras: st.caption(" | ".join(extras))
+            symptom_guess = ""
+            if note and (" for " in note.lower()):
+                symptom_guess = note.lower().split(" for ",1)[1].strip()
+            symptom = st.text_input("Symptom treated (optional)", symptom_guess, key=f"versym_{slot}")
+            if st.button("Looks correct - Add to Database", key=f"confirm_{slot}", type="primary"):
+                n,was,isnew = save_discovered_food(
+                    ver_name.strip(), ftype, current_user, symptom,
+                    res.get('symptom_dosha',''), specific_land, ts[1],
+                    botanical=ver_bot.strip(), importance=res.get('plant_importance',''),
+                    remediates=res.get('remediates',''))
+                if n is not None:
+                    if isnew:
+                        st.success(f"'{ver_name}' added as NEW! Botanical: {ver_bot}. First mention.")
+                    else:
+                        st.success(f"'{ver_name}' added! Now mentioned {n} times (was {was}). Botanical: {ver_bot}")
+                    if symptom:
+                        save_remedy(ver_name.strip(), ver_bot.strip(), symptom, res.get('symptom_dosha',''), specific_land, ts[1], "Yes")
+                    del st.session_state[akey]
+                else:
+                    st.warning("Could not save. Try again.")
 
-            mc=sum(1 for s in ["morning","afternoon","evening"] if s in meal_results);hc=sum(1 for h in [mh,ah,eh] if h=="Yes")
-            hs=min(10,max(1,(mc*2)+(hc*2)-(junk_count)+(fe//3)))
+    meal_item_widget("morning","Morning",vm)
+    st.markdown("---")
+    meal_item_widget("afternoon","Afternoon",va)
+    st.markdown("---")
+    meal_item_widget("evening","Evening",ve)
+    st.markdown("---")
 
-            try:
-                conn=db();cur=conn.cursor()
-                cur.execute("""INSERT INTO feedback_detailed (user_id,feedback_date,pincode,area_name,specific_land,tamil_season,weather_condition,morning_notes,morning_rating,morning_helped,morning_parsed,afternoon_notes,afternoon_rating,afternoon_helped,afternoon_parsed,evening_notes,evening_rating,evening_helped,evening_parsed,junk_notes,junk_parsed,junk_count,energy_level,digestion,sleep_quality,mood,daily_health_score) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                    (current_user,date.today(),typed_pin,f"{pin_area}, {pin_district}",specific_land,ts[1],f"{w['temp']}C {w['desc']}",mn,mr,mh,json.dumps(meal_results.get('morning')),an,ar,ah,json.dumps(meal_results.get('afternoon')),en,er,eh,json.dumps(meal_results.get('evening')),jn,json.dumps(junk_result),junk_count,fe,fd,fsl,fmo,hs))
-                conn.commit();cur.close();conn.close();st.success("✅ Saved!")
-                # Clear voice session
-                for k in ['voice_morning','voice_afternoon','voice_evening','voice_junk']:
-                    if k in st.session_state: del st.session_state[k]
-            except Exception as e: st.warning(f"Save: {e}")
+    st.subheader("Save Today's Daily Log")
+    st.caption("Records ratings, energy, digestion, mood for your History & scores.")
+    with st.form("daily_feedback"):
+        c1,c2,c3=st.columns(3)
+        with c1: mr=st.slider("Morning rating",1,5,3,key="mr"); mh=st.selectbox("Morning helped?",["Yes","Partially","No","Not for health"],key="mh")
+        with c2: ar=st.slider("Afternoon rating",1,5,3,key="ar"); ah=st.selectbox("Afternoon helped?",["Yes","Partially","No","Not for health"],key="ah")
+        with c3: er=st.slider("Evening rating",1,5,3,key="er"); eh=st.selectbox("Evening helped?",["Yes","Partially","No","Not for health"],key="eh")
+        jn=st.text_area("Junk food today:",vj,height=50,key="jn",placeholder="Chips, pepsi, kurkure")
+        c1,c2,c3,c4=st.columns(4)
+        with c1: fe=st.slider("Energy",1,10,5,key="fe")
+        with c2: fd=st.selectbox("Digestion",["Good","Normal","Sluggish","Weak"],key="fd")
+        with c3: fsl=st.selectbox("Sleep",["Good","Normal","Disturbed","Poor"],key="fsl")
+        with c4: fmo=st.selectbox("Mood",["Happy","Normal","Tired","Irritable"],key="fmo")
+        save_day=st.form_submit_button("Save Today's Log",type="primary")
 
-            # Display results
-            st.markdown("---");st.title("🤖 AI Analysis")
-            analysis_text = ""
-            for slot,icon,txt,rating,helped in [("morning","☀️",mn,mr,mh),("afternoon","🌞",an,ar,ah),("evening","🌙",en,er,eh)]:
-                if slot in meal_results and meal_results[slot]:
-                    st.markdown("---");st.subheader(f"{icon} {slot.title()}")
-                    mr2=meal_results[slot]
-                    if mr2.get('dishes'):
-                        for dish in mr2['dishes']:
-                            st.markdown(f"**📌 {dish.get('name','')}**")
-                            parts=[]
-                            if dish.get('vegetables'): parts.append(f"🥬 {', '.join(dish['vegetables'])}")
-                            if dish.get('leaves_greens'): parts.append(f"🌿 {', '.join(dish['leaves_greens'])}")
-                            if dish.get('herbs'): parts.append(f"🌱 {', '.join(dish['herbs'])}")
-                            if dish.get('grains'): parts.append(f"🌾 {', '.join(dish['grains'])}")
-                            for p in parts: st.write(p)
-                            if dish.get('symptom_treated'): st.write(f"🤒 **For:** {dish['symptom_treated']}")
-                            analysis_text += f"{slot}: {dish.get('name','')} for {dish.get('symptom_treated','general health')}. "
-                    if mr2.get('ai_note'): st.info(f"💡 {mr2['ai_note']}"); analysis_text += mr2['ai_note'] + " "
+    if save_day:
+        mn=st.session_state.get('note_morning','');an=st.session_state.get('note_afternoon','');en=st.session_state.get('note_evening','')
+        junk_result=None;junk_count=0
+        if jn.strip():
+            with st.spinner("Junk analysis..."):
+                jprompt='Nutritionist. Junk: "'+jn+'". Return JSON: {"items":[{"name":"X","dosha_impact":"X","healing_interference":"X","consumed_by":"Adult/Kids/Both","tamil_alternative":"X","alternative_benefit":"X"}],"total_junk_count":3,"overall_message":"X"}'
+                junk_result=ai(jprompt)
+                if junk_result: junk_count=junk_result.get('total_junk_count',0)
+        mc=sum(1 for t in [mn,an,en] if t and t.strip());hc=sum(1 for h in [mh,ah,eh] if h=="Yes")
+        hs=min(10,max(1,(mc*2)+(hc*2)-(junk_count)+(fe//3)))
+        try:
+            conn=db();cur=conn.cursor()
+            cur.execute("INSERT INTO feedback_detailed (user_id,feedback_date,pincode,area_name,specific_land,tamil_season,weather_condition,morning_notes,morning_rating,morning_helped,afternoon_notes,afternoon_rating,afternoon_helped,evening_notes,evening_rating,evening_helped,junk_notes,junk_parsed,junk_count,energy_level,digestion,sleep_quality,mood,daily_health_score) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (current_user,date.today(),typed_pin,f"{pin_area}, {pin_district}",specific_land,ts[1],f"{w['temp']}C {w['desc']}",mn,mr,mh,an,ar,ah,en,er,eh,jn,json.dumps(junk_result),junk_count,fe,fd,fsl,fmo,hs))
+            conn.commit();cur.close();conn.close();st.success(f"Daily log saved! Score: {hs}/10")
+            for k in ['voice_morning','voice_afternoon','voice_evening','voice_junk']:
+                if k in st.session_state: del st.session_state[k]
+        except Exception as e: st.warning(f"Save: {e}")
+        if junk_result and junk_result.get('items'):
+            st.markdown("#### Junk Impact")
+            for item in junk_result['items']:
+                st.warning(f"{item.get('name','')} - {item.get('dosha_impact','')}")
+                st.success(f"Try instead: {item.get('tamil_alternative','')} -> {item.get('alternative_benefit','')}")
+            if junk_result.get('overall_message'): st.info(junk_result['overall_message'])
+        c1,c2,c3=st.columns(3)
+        c1.metric("Score",f"{hs}/10");c2.metric("Meals",f"{mc}/3");c3.metric("Junk",junk_count)
 
-            if junk_result and junk_result.get('items'):
-                st.markdown("---");st.subheader("🍟 Junk Impact")
-                for item in junk_result['items']:
-                    st.markdown(f"**⚠️ {item.get('name','')}**");st.write(f"⚖️ {item.get('dosha_impact','')}")
-                    st.warning(f"🔄 {item.get('healing_interference','')}")
-                    st.success(f"🌿 Alternative: {item.get('tamil_alternative','')} → {item.get('alternative_benefit','')}")
-                    analysis_text += f"Junk: {item.get('name','')} - replace with {item.get('tamil_alternative','')}. "
-                if junk_result.get('overall_message'): st.info(f"💡 {junk_result['overall_message']}")
-
-            st.markdown("---");col1,col2,col3=st.columns(3)
-            col1.metric("🏥 Score",f"{hs}/10");col2.metric("🟢 Meals",f"{mc}/3");col3.metric("🔴 Junk",junk_count)
-
-            # Voice output
-            if analysis_text:
-                st.markdown("---")
-                if st.button("🔊 Hear Analysis in Tamil"):
-                    with st.spinner("Generating audio..."):
-                        audio = speak(analysis_text, 'en')
-                        if audio: st.audio(audio, format='audio/mp3')
 
 # ==================== PAGE 2: FOOD HISTORY ====================
 elif page=="📅 History":
@@ -437,18 +491,22 @@ elif page=="📅 History":
 elif page=="🍽️ Foods Found":
     st.title("🍽️ Discovered Foods (Auto-Growing)")
     try:
-        c=db();cur=c.cursor();cur.execute("SELECT food_name,food_type,discovered_by,times_mentioned,associated_symptoms,dosha_assessment,land_discovered,season_discovered,first_discovered,last_mentioned FROM discovered_foods ORDER BY last_mentioned DESC");foods=cur.fetchall();cur.close();c.close()
+        c=db();cur=c.cursor();cur.execute("SELECT food_name,food_type,discovered_by,times_mentioned,associated_symptoms,dosha_assessment,land_discovered,season_discovered,botanical_name,remediates,plant_importance FROM discovered_foods ORDER BY last_mentioned DESC");foods=cur.fetchall();cur.close();c.close()
         if foods:
             st.write(f"**Total: {len(foods)} foods discovered!**")
-            tf=st.selectbox("Filter",["All","Dish","Vegetable","Leaf/Green","Herb","Grain"])
+            tf=st.selectbox("Filter",["All","Dish","Vegetable","Leaf/Green","Herb","Grain","Spice"])
             for f in foods:
                 if tf!="All" and f[1]!=tf: continue
                 ti={"Dish":"🍽️","Vegetable":"🥬","Leaf/Green":"🌿","Herb":"🌱","Grain":"🌾","Spice":"🌶️"}.get(f[1],"🍽️")
                 col1,col2=st.columns([1,2])
-                with col1: st.markdown(f"### {ti} {f[0]}"); st.write(f"**{f[1]}** | Mentioned: {f[3]}x")
+                with col1:
+                    st.markdown(f"### {ti} {f[0]}")
+                    if f[8]: st.caption(f"*{f[8]}*")
+                    st.write(f"**{f[1]}** | Mentioned: {f[3]}x")
                 with col2:
+                    if f[9]: st.success(f"💊 Remediates: {f[9]}")
+                    if f[10]: st.write(f"⭐ {f[10]}")
                     if f[4]: st.write(f"🤒 For: {f[4]}")
-                    if f[5]: st.write(f"⚖️ {f[5]}")
                     st.write(f"📍 {f[6] or ''} | 🌦️ {f[7] or ''} | By: {f[2] or ''}")
                 st.markdown("---")
         else: st.info("No foods yet. Log meals to start!")

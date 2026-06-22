@@ -193,10 +193,21 @@ def get_food_details(food_name):
     except: return None
 
 def get_foods_missing_botanical():
-    """Return [(food_id, food_name, food_type)] for foods with no botanical name yet."""
+    """Return [(food_id, food_name, food_type)] for PLANT foods (not dishes) with no botanical name yet."""
     try:
-        c=db();cur=c.cursor();cur.execute("SELECT food_id,food_name,food_type FROM discovered_foods WHERE botanical_name IS NULL OR botanical_name='' ORDER BY food_id");r=cur.fetchall();cur.close();c.close();return r
+        c=db();cur=c.cursor();cur.execute("SELECT food_id,food_name,food_type FROM discovered_foods WHERE food_type<>'Dish' AND (botanical_name IS NULL OR botanical_name='') ORDER BY food_id");r=cur.fetchall();cur.close();c.close();return r
     except: return []
+
+def get_all_discovered_foods():
+    """Return [(food_id, food_name, food_type, botanical_name, times_mentioned)] for management."""
+    try:
+        c=db();cur=c.cursor();cur.execute("SELECT food_id,food_name,food_type,botanical_name,times_mentioned FROM discovered_foods ORDER BY food_type,food_name");r=cur.fetchall();cur.close();c.close();return r
+    except: return []
+
+def delete_discovered_food(food_id):
+    try:
+        c=db();cur=c.cursor();cur.execute("DELETE FROM discovered_foods WHERE food_id=%s",(food_id,));c.commit();cur.close();c.close();return True
+    except: return False
 
 def update_food_botanical(food_id,botanical,importance,remediates):
     """Fill the 3 new columns for one food by id."""
@@ -362,7 +373,12 @@ if page=="📝 Food Log":
             res = st.session_state[akey]
             st.markdown("#### Verify AI Analysis")
             ver_name = st.text_input("Food name", res.get('clean_name', new_name), key=f"vername_{slot}")
-            ver_bot = st.text_input("Botanical name", res.get('botanical_name',''), key=f"verbot_{slot}")
+            is_dish = (ftype == "Dish")
+            if is_dish:
+                ver_bot = ""
+                st.caption("ℹ️ Dishes don't get a botanical name (it's a mix of ingredients).")
+            else:
+                ver_bot = st.text_input("Botanical name", res.get('botanical_name',''), key=f"verbot_{slot}")
             st.write(f"Key plant: {res.get('key_plant_tamil','')}")
             if res.get('plant_importance'): st.write(f"Importance: {res['plant_importance']}")
             if res.get('remediates'): st.success(f"Remediates: {res['remediates']}")
@@ -381,10 +397,11 @@ if page=="📝 Food Log":
                     botanical=ver_bot.strip(), importance=res.get('plant_importance',''),
                     remediates=res.get('remediates',''))
                 if n is not None:
+                    bot_msg = f" Botanical: {ver_bot}" if ver_bot else ""
                     if isnew:
-                        st.success(f"'{ver_name}' added as NEW! Botanical: {ver_bot}. First mention.")
+                        st.success(f"'{ver_name}' added as NEW!{bot_msg} First mention.")
                     else:
-                        st.success(f"'{ver_name}' added! Now mentioned {n} times (was {was}). Botanical: {ver_bot}")
+                        st.success(f"'{ver_name}' added! Now mentioned {n} times (was {was}).{bot_msg}")
                     if symptom:
                         save_remedy(ver_name.strip(), ver_bot.strip(), symptom, res.get('symptom_dosha',''), specific_land, ts[1], "Yes")
                     del st.session_state[akey]
@@ -651,7 +668,7 @@ elif page=="🌿 Herbs":
 # ==================== PAGE 10: ADMIN ====================
 elif page=="🔧 Admin":
     st.title("🔧 Admin")
-    tab=st.radio("",["🌿 Herb","🍽️ Dish","👤 Users","🧬 Backfill Botanical"])
+    tab=st.radio("",["🌿 Herb","🍽️ Dish","👤 Users","🧬 Backfill Botanical","🗑️ Manage Foods"])
     if tab=="🌿 Herb":
         with st.form("herb"):
             col1,col2=st.columns(2)
@@ -677,15 +694,15 @@ elif page=="🔧 Admin":
         if missing:
             with st.expander("See the list"):
                 for m in missing: st.write(f"• {m[1]} ({m[2]})")
-            st.caption("This asks AI to identify the key plant for each food and fills botanical name, importance, and what it remediates. For mixed dishes it uses the hero medicinal ingredient. Runs ~1 food/second. You can edit any value later in the verify flow.")
+            st.caption("This asks AI to identify the botanical name for each plant ingredient (vegetables, herbs, greens, grains, spices) and fills botanical name, importance, and what it remediates. Dishes are skipped — they're a mix of ingredients. Runs ~1 food/second. You can edit or delete any entry later.")
             colA,colB=st.columns(2)
             with colA: batch=st.number_input("How many to process now?",1,len(missing),min(len(missing),25))
             with colB: st.write("");st.write("")
             if st.button(f"🚀 Backfill {batch} foods now",type="primary"):
                 prog=st.progress(0.0);done=0;filled=0;log_area=st.empty()
                 for idx,(fid,fname,ftype) in enumerate(missing[:batch]):
-                    prompt=('Tamil Siddha food & botany expert. Food: "'+fname+'" (type: '+(ftype or 'Dish')+'). '
-                            'Identify the MAIN medicinal plant/ingredient (for a mixed dish use its hero ingredient). '
+                    prompt=('Tamil Siddha food & botany expert. Plant/ingredient: "'+fname+'" (type: '+(ftype or 'Herb')+'). '
+                            'Identify its botanical (Latin) name. '
                             'Return ONLY JSON: {"botanical_name":"Latin name","plant_importance":"why it matters in Siddha/Ayurveda (1-2 sentences)","remediates":"conditions it helps, comma separated"}')
                     res=ai(prompt)
                     if res and res.get('botanical_name'):
@@ -697,7 +714,26 @@ elif page=="🔧 Admin":
                     done+=1;prog.progress(done/batch)
                 st.success(f"Done! Filled {filled} of {done} processed. {len(missing)-done} still remaining — run again to continue.")
         else:
-            st.success("🎉 All foods already have botanical names!")
+            st.success("🎉 All plant foods already have botanical names!")
+    elif tab=="🗑️ Manage Foods":
+        st.subheader("🗑️ Manage / Delete Foods")
+        st.caption("Remove wrong or duplicate entries from the discovered foods database.")
+        allfoods=get_all_discovered_foods()
+        if not allfoods:
+            st.info("No discovered foods yet.")
+        else:
+            st.write(f"**{len(allfoods)} foods** in database.")
+            ticon={"Dish":"🍽️","Vegetable":"🥬","Leaf/Green":"🌿","Herb":"🌱","Grain":"🌾","Spice":"🌶️"}
+            labels=[f"{ticon.get(a[2],'🍽️')} {a[1]}  ({a[2]}, {a[4]}x)" for a in allfoods]
+            sel=st.selectbox("Pick a food to inspect/delete",range(len(labels)),format_func=lambda i:labels[i])
+            chosen=allfoods[sel]
+            st.markdown(f"**{chosen[1]}** — type: {chosen[2]} | botanical: *{chosen[3] or 'n/a'}* | mentioned {chosen[4]}x")
+            confirm=st.checkbox(f"Yes, permanently delete '{chosen[1]}'",key="confirm_del")
+            if st.button("🗑️ Delete this food",type="primary",disabled=not confirm):
+                if delete_discovered_food(chosen[0]):
+                    st.success(f"Deleted '{chosen[1]}'. Refresh to update the list.")
+                else:
+                    st.error("Could not delete. Try again.")
     st.markdown("---")
     try:
         c=db();cur=c.cursor()

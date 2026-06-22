@@ -366,7 +366,23 @@ if page=="📝 Food Log":
     def meal_item_widget(slot, icon, default_text):
         st.markdown(f"### {icon} {slot.title()}")
         note = st.text_area(f"{slot.title()} note (what & why):", default_text, height=60,
-                            key=f"note_{slot}", placeholder="e.g. Seenthil kadaisal for fever")
+                            key=f"note_{slot}", placeholder="e.g. Saranai keerai sambar with avarakkai poriyal for stomach")
+
+        bkey = f"basket_{slot}"
+        if bkey not in st.session_state: st.session_state[bkey] = []
+
+        # Show current basket for this meal
+        if st.session_state[bkey]:
+            st.markdown("**Items added for this meal:**")
+            for i,item in enumerate(st.session_state[bkey]):
+                ic={"Dish":"🍽️","Vegetable":"🥬","Leaf/Green":"🌿","Herb":"🌱","Grain":"🌾","Spice":"🌶️"}.get(item['type'],"🍽️")
+                c1,c2=st.columns([5,1])
+                with c1: st.write(f"{ic} {item['name']}" + (f"  ·  *{item['botanical']}*" if item.get('botanical') else ""))
+                with c2:
+                    if st.button("✖", key=f"rm_{slot}_{i}"):
+                        st.session_state[bkey].pop(i); st.rerun()
+            st.markdown("---")
+
         ftype = st.selectbox("Food type", TYPE_OPTIONS, key=f"ftype_{slot}")
         existing = get_foods_by_type(ftype)
         existing_names = [e[0] for e in existing]
@@ -374,29 +390,31 @@ if page=="📝 Food Log":
         choice = st.selectbox(f"Pick existing {ftype.lower()} or add new", dropdown, key=f"pick_{slot}")
         akey = f"analyzed_{slot}"
 
+        def in_basket(name):
+            return any((it['name'].strip().lower()==name.strip().lower()) for it in st.session_state[bkey])
+
+        # --- Existing food: add straight to basket + DB ---
         if choice != "+ Type new food":
             det = get_food_details(choice)
             if det:
                 st.info(f"**{det[0]}** | *{det[2] or 'botanical n/a'}* | mentioned {det[5]}x")
                 if det[4]: st.write(f"Remediates: {det[4]}")
-                if det[3]: st.write(f"Importance: {det[3]}")
-            if st.button(f"Add this {ftype.lower()}", key=f"addexist_{slot}"):
-                n,was,isnew = save_discovered_food(choice,ftype,current_user,"","",specific_land,ts[1])
-                if n is not None:
-                    st.success(f"'{choice}' added! Now mentioned {n} times (was {was}).")
+            if st.button(f"➕ Add this {ftype.lower()} to meal", key=f"addexist_{slot}"):
+                if in_basket(choice):
+                    st.warning(f"'{choice}' is already in this meal.")
                 else:
-                    st.warning("Could not save. Try again.")
+                    n,was,isnew = save_discovered_food(choice,ftype,current_user,"","",specific_land,ts[1])
+                    st.session_state[bkey].append({"name":choice,"type":ftype,"botanical":det[2] if det else "","symptom":""})
+                    st.success(f"Added '{choice}' to {slot}. (now mentioned {n}x)"); st.rerun()
             return
 
+        # --- New food: type -> analyze -> verify -> add to basket + DB ---
         new_name = st.text_input(f"Type the {ftype.lower()} name", key=f"new_{slot}",
-                                 placeholder="e.g. Seenthil kadaisal")
+                                 placeholder="e.g. Saranai keerai")
         col_a, col_b = st.columns(2)
-        with col_a:
-            analyze = st.button("Analyze", key=f"analyze_{slot}")
-        with col_b:
-            clear = st.button("Clear", key=f"clear_{slot}")
-        if clear and akey in st.session_state:
-            del st.session_state[akey]
+        with col_a: analyze = st.button("Analyze", key=f"analyze_{slot}")
+        with col_b: clear = st.button("Clear", key=f"clear_{slot}")
+        if clear and akey in st.session_state: del st.session_state[akey]
 
         if analyze and new_name.strip():
             with st.spinner("Analyzing & identifying botanical name..."):
@@ -409,10 +427,8 @@ if page=="📝 Food Log":
                     '"herbs":[],"grains":[],"spices":[],"symptom_dosha":"Vata/Pitta/Kapha or empty"}'
                 )
                 res = ai(prompt)
-            if res:
-                st.session_state[akey] = res
-            else:
-                st.warning("AI couldn't analyze. Check spelling or try again.")
+            if res: st.session_state[akey] = res
+            else: st.warning("AI couldn't analyze. Check spelling or try again.")
 
         if akey in st.session_state and st.session_state[akey]:
             res = st.session_state[akey]
@@ -435,23 +451,23 @@ if page=="📝 Food Log":
             if note and (" for " in note.lower()):
                 symptom_guess = note.lower().split(" for ",1)[1].strip()
             symptom = st.text_input("Symptom treated (optional)", symptom_guess, key=f"versym_{slot}")
-            if st.button("Looks correct - Add to Database", key=f"confirm_{slot}", type="primary"):
-                n,was,isnew = save_discovered_food(
-                    ver_name.strip(), ftype, current_user, symptom,
-                    res.get('symptom_dosha',''), specific_land, ts[1],
-                    botanical=ver_bot.strip(), importance=res.get('plant_importance',''),
-                    remediates=res.get('remediates',''))
-                if n is not None:
-                    bot_msg = f" Botanical: {ver_bot}" if ver_bot else ""
-                    if isnew:
-                        st.success(f"'{ver_name}' added as NEW!{bot_msg} First mention.")
-                    else:
-                        st.success(f"'{ver_name}' added! Now mentioned {n} times (was {was}).{bot_msg}")
-                    if symptom:
-                        save_remedy(ver_name.strip(), ver_bot.strip(), symptom, res.get('symptom_dosha',''), specific_land, ts[1], "Yes")
-                    del st.session_state[akey]
+            if st.button("✅ Looks correct - Add to meal", key=f"confirm_{slot}", type="primary"):
+                if in_basket(ver_name):
+                    st.warning(f"'{ver_name}' is already in this meal.")
                 else:
-                    st.warning("Could not save. Try again.")
+                    n,was,isnew = save_discovered_food(
+                        ver_name.strip(), ftype, current_user, symptom,
+                        res.get('symptom_dosha',''), specific_land, ts[1],
+                        botanical=ver_bot.strip(), importance=res.get('plant_importance',''),
+                        remediates=res.get('remediates',''))
+                    if n is not None:
+                        if symptom:
+                            save_remedy(ver_name.strip(), ver_bot.strip(), symptom, res.get('symptom_dosha',''), specific_land, ts[1], "Yes")
+                        st.session_state[bkey].append({"name":ver_name.strip(),"type":ftype,"botanical":ver_bot.strip(),"symptom":symptom})
+                        del st.session_state[akey]
+                        st.success(f"Added '{ver_name}' to {slot}."); st.rerun()
+                    else:
+                        st.warning("Could not save. Try again.")
 
     meal_item_widget("morning","Morning",vm)
     st.markdown("---")
@@ -490,7 +506,7 @@ if page=="📝 Food Log":
             cur.execute("INSERT INTO feedback_detailed (user_id,feedback_date,pincode,area_name,specific_land,tamil_season,weather_condition,morning_notes,morning_rating,morning_helped,afternoon_notes,afternoon_rating,afternoon_helped,evening_notes,evening_rating,evening_helped,junk_notes,junk_parsed,junk_count,energy_level,digestion,sleep_quality,mood,daily_health_score) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                 (current_user,date.today(),typed_pin,f"{pin_area}, {pin_district}",specific_land,ts[1],f"{w['temp']}C {w['desc']}",mn,mr,mh,an,ar,ah,en,er,eh,jn,json.dumps(junk_result),junk_count,fe,fd,fsl,fmo,hs))
             conn.commit();cur.close();conn.close();st.success(f"Daily log saved! Score: {hs}/10")
-            for k in ['voice_morning','voice_afternoon','voice_evening','voice_junk']:
+            for k in ['voice_morning','voice_afternoon','voice_evening','voice_junk','basket_morning','basket_afternoon','basket_evening']:
                 if k in st.session_state: del st.session_state[k]
         except Exception as e: st.warning(f"Save: {e}")
         if junk_result and junk_result.get('items'):

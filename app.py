@@ -408,6 +408,10 @@ if page=="📝 Food Log":
 
         bkey = f"basket_{slot}"
         if bkey not in st.session_state: st.session_state[bkey] = []
+        # reset nonce: bumping this gives fresh widget keys without deleting live keys
+        nkey = f"nonce_{slot}"
+        if nkey not in st.session_state: st.session_state[nkey] = 0
+        non = st.session_state[nkey]
 
         # Show current basket for this meal
         if st.session_state[bkey]:
@@ -421,11 +425,11 @@ if page=="📝 Food Log":
                         st.session_state[bkey].pop(i); st.rerun()
             st.markdown("---")
 
-        ftype = st.selectbox("Food type", TYPE_OPTIONS, key=f"ftype_{slot}")
+        ftype = st.selectbox("Food type", TYPE_OPTIONS, key=f"ftype_{slot}_{non}")
         existing = get_foods_by_type(ftype)
         existing_names = [e[0] for e in existing]
         dropdown = ["+ Type new food"] + existing_names
-        choice = st.selectbox(f"Pick existing {ftype.lower()} or add new", dropdown, key=f"pick_{slot}")
+        choice = st.selectbox(f"Pick existing {ftype.lower()} or add new", dropdown, key=f"pick_{slot}_{non}")
         akey = f"analyzed_{slot}"
 
         def in_basket(name):
@@ -437,24 +441,23 @@ if page=="📝 Food Log":
             if det:
                 st.info(f"**{det[0]}** | *{det[2] or 'botanical n/a'}* | mentioned {det[5]}x")
                 if det[4]: st.write(f"Remediates: {det[4]}")
-            if st.button(f"➕ Add this {ftype.lower()} to meal", key=f"addexist_{slot}"):
+            if st.button(f"➕ Add this {ftype.lower()} to meal", key=f"addexist_{slot}_{non}"):
                 if in_basket(choice):
                     st.warning(f"'{choice}' is already in this meal.")
                 else:
                     n,was,isnew = save_discovered_food(choice,ftype,current_user,"","",specific_land,ts[1])
                     st.session_state[bkey].append({"name":choice,"type":ftype,"botanical":det[2] if det else "","symptom":""})
-                    # reset this slot's pickers so next item starts fresh
-                    for rk in [f"pick_{slot}",f"new_{slot}",f"vername_{slot}",f"verbot_{slot}",f"versym_{slot}",f"analyzed_{slot}"]:
-                        if rk in st.session_state: del st.session_state[rk]
+                    if akey in st.session_state: del st.session_state[akey]
+                    st.session_state[nkey] += 1  # fresh pickers next run
                     st.success(f"Added '{choice}' to {slot}."); st.rerun()
             return
 
         # --- New food: type -> analyze -> verify -> add to basket + DB ---
-        new_name = st.text_input(f"Type the {ftype.lower()} name", key=f"new_{slot}",
+        new_name = st.text_input(f"Type the {ftype.lower()} name", key=f"new_{slot}_{non}",
                                  placeholder="e.g. Saranai keerai")
         col_a, col_b = st.columns(2)
-        with col_a: analyze = st.button("Analyze", key=f"analyze_{slot}")
-        with col_b: clear = st.button("Clear", key=f"clear_{slot}")
+        with col_a: analyze = st.button("Analyze", key=f"analyze_{slot}_{non}")
+        with col_b: clear = st.button("Clear", key=f"clear_{slot}_{non}")
         if clear and akey in st.session_state: del st.session_state[akey]
 
         if analyze and new_name.strip():
@@ -474,13 +477,13 @@ if page=="📝 Food Log":
         if akey in st.session_state and st.session_state[akey]:
             res = st.session_state[akey]
             st.markdown("#### Verify AI Analysis")
-            ver_name = st.text_input("Food name", res.get('clean_name', new_name), key=f"vername_{slot}")
+            ver_name = st.text_input("Food name", res.get('clean_name', new_name), key=f"vername_{slot}_{non}")
             is_dish = (ftype == "Dish")
             if is_dish:
                 ver_bot = ""
                 st.caption("ℹ️ Dishes don't get a botanical name (it's a mix of ingredients).")
             else:
-                ver_bot = st.text_input("Botanical name", res.get('botanical_name',''), key=f"verbot_{slot}")
+                ver_bot = st.text_input("Botanical name", res.get('botanical_name',''), key=f"verbot_{slot}_{non}")
             st.write(f"Key plant: {res.get('key_plant_tamil','')}")
             if res.get('plant_importance'): st.write(f"Importance: {res['plant_importance']}")
             if res.get('remediates'): st.success(f"Remediates: {res['remediates']}")
@@ -491,8 +494,8 @@ if page=="📝 Food Log":
             symptom_guess = ""
             if note and (" for " in note.lower()):
                 symptom_guess = note.lower().split(" for ",1)[1].strip()
-            symptom = st.text_input("Symptom treated (optional)", symptom_guess, key=f"versym_{slot}")
-            if st.button("✅ Looks correct - Add to meal", key=f"confirm_{slot}", type="primary"):
+            symptom = st.text_input("Symptom treated (optional)", symptom_guess, key=f"versym_{slot}_{non}")
+            if st.button("✅ Looks correct - Add to meal", key=f"confirm_{slot}_{non}", type="primary"):
                 if in_basket(ver_name):
                     st.warning(f"'{ver_name}' is already in this meal.")
                 else:
@@ -505,9 +508,8 @@ if page=="📝 Food Log":
                         if symptom:
                             save_remedy(ver_name.strip(), ver_bot.strip(), symptom, res.get('symptom_dosha',''), specific_land, ts[1], "Yes")
                         st.session_state[bkey].append({"name":ver_name.strip(),"type":ftype,"botanical":ver_bot.strip(),"symptom":symptom})
-                        # reset this slot's pickers so next item starts fresh
-                        for rk in [f"pick_{slot}",f"new_{slot}",f"vername_{slot}",f"verbot_{slot}",f"versym_{slot}",f"analyzed_{slot}"]:
-                            if rk in st.session_state: del st.session_state[rk]
+                        if akey in st.session_state: del st.session_state[akey]
+                        st.session_state[nkey] += 1  # fresh pickers next run
                         st.success(f"Added '{ver_name}' to {slot}."); st.rerun()
                     else:
                         st.warning("Could not save. Try again.")

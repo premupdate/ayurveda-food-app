@@ -405,7 +405,10 @@ if page=="📝 Food Log":
                 else:
                     n,was,isnew = save_discovered_food(choice,ftype,current_user,"","",specific_land,ts[1])
                     st.session_state[bkey].append({"name":choice,"type":ftype,"botanical":det[2] if det else "","symptom":""})
-                    st.success(f"Added '{choice}' to {slot}. (now mentioned {n}x)"); st.rerun()
+                    # reset this slot's pickers so next item starts fresh
+                    for rk in [f"pick_{slot}",f"new_{slot}",f"vername_{slot}",f"verbot_{slot}",f"versym_{slot}",f"analyzed_{slot}"]:
+                        if rk in st.session_state: del st.session_state[rk]
+                    st.success(f"Added '{choice}' to {slot}."); st.rerun()
             return
 
         # --- New food: type -> analyze -> verify -> add to basket + DB ---
@@ -464,16 +467,18 @@ if page=="📝 Food Log":
                         if symptom:
                             save_remedy(ver_name.strip(), ver_bot.strip(), symptom, res.get('symptom_dosha',''), specific_land, ts[1], "Yes")
                         st.session_state[bkey].append({"name":ver_name.strip(),"type":ftype,"botanical":ver_bot.strip(),"symptom":symptom})
-                        del st.session_state[akey]
+                        # reset this slot's pickers so next item starts fresh
+                        for rk in [f"pick_{slot}",f"new_{slot}",f"vername_{slot}",f"verbot_{slot}",f"versym_{slot}",f"analyzed_{slot}"]:
+                            if rk in st.session_state: del st.session_state[rk]
                         st.success(f"Added '{ver_name}' to {slot}."); st.rerun()
                     else:
                         st.warning("Could not save. Try again.")
 
-    meal_item_widget("morning","Morning",vm)
+    meal_item_widget("morning","☀️",vm)
     st.markdown("---")
-    meal_item_widget("afternoon","Afternoon",va)
+    meal_item_widget("afternoon","🌞",va)
     st.markdown("---")
-    meal_item_widget("evening","Evening",ve)
+    meal_item_widget("evening","🌙",ve)
     st.markdown("---")
 
     st.subheader("Save Today's Daily Log")

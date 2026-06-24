@@ -357,7 +357,7 @@ if page=="📝 Food Log":
     # default to sidebar-selected user if valid, else first
     default_idx=fl_names.index(current_user) if current_user in fl_names else 0
     chosen_user=st.selectbox("Select user",fl_names,index=default_idx,key="foodlog_user")
-    # If user switched here, reset that person's context (pincode/land) and clear baskets
+    # Make the page selector the source of truth for this page
     if chosen_user!=current_user:
         for ud2 in fl_users:
             if ud2[0]==chosen_user:
@@ -366,9 +366,12 @@ if page=="📝 Food Log":
                 weather_loc=dp2[5] if dp2 else (pin_district or "Chennai")
                 current_land_id=land_id_map.get(specific_land,3)
                 break
-        # clear baskets/analysis when switching person so items don't carry over
-        for k in ['basket_morning','basket_afternoon','basket_evening','analyzed_morning','analyzed_afternoon','analyzed_evening']:
-            if k in st.session_state: del st.session_state[k]
+    # Only clear baskets when the user ACTUALLY changes (not on every rerun)
+    if st.session_state.get("last_foodlog_user") != chosen_user:
+        if st.session_state.get("last_foodlog_user") is not None:
+            for k in ['basket_morning','basket_afternoon','basket_evening','analyzed_morning','analyzed_afternoon','analyzed_evening']:
+                if k in st.session_state: del st.session_state[k]
+        st.session_state["last_foodlog_user"]=chosen_user
     st.caption(f"Logging for **{current_user}** · 📍 {pin_area or '—'} ({specific_land})")
     st.markdown("---")
 

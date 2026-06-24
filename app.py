@@ -491,9 +491,43 @@ if page=="📝 Food Log":
                     st.success(f"Added '{choice}' to {slot}."); st.rerun()
             return
 
-        # --- New food: type -> analyze -> verify -> add to basket + DB ---
+        # --- New food: type -> analyze (AI) OR manual entry -> add to basket + DB ---
         new_name = st.text_input(f"Type the {ftype.lower()} name", key=f"new_{slot}_{non}",
                                  placeholder="e.g. Saranai keerai")
+        manual_mode = st.checkbox("✍️ Manual entry (no AI)", key=f"manual_{slot}_{non}",
+                                  help="Use this if AI quota is exhausted or you want to type details yourself.")
+
+        is_dish = (ftype == "Dish")
+
+        if manual_mode:
+            # ----- MANUAL ENTRY FORM (no AI call) -----
+            st.markdown("**✍️ Enter details manually**")
+            man_bot = ""
+            if is_dish:
+                st.caption("ℹ️ Dishes don't get a botanical name (it's a mix of ingredients).")
+            else:
+                man_bot = st.text_input("Botanical name (optional)", "", key=f"manbot_{slot}_{non}", placeholder="e.g. Trianthema portulacastrum")
+            man_rem = st.text_input("What it remediates (optional)", "", key=f"manrem_{slot}_{non}", placeholder="e.g. cold, cough")
+            man_sym = st.text_input("Symptom treated (optional)", "", key=f"mansym_{slot}_{non}")
+            if st.button("➕ Add to meal (manual)", key=f"manadd_{slot}_{non}", type="primary"):
+                if not new_name.strip():
+                    st.warning("Type the food name first.")
+                elif in_basket(new_name):
+                    st.warning(f"'{new_name}' is already in this meal.")
+                else:
+                    n,was,isnew = save_discovered_food(
+                        new_name.strip(), ftype, current_user, man_sym,
+                        "", specific_land, ts[1],
+                        botanical=man_bot.strip(), importance="", remediates=man_rem.strip())
+                    if n is not None:
+                        if man_sym: save_remedy(new_name.strip(), man_bot.strip(), man_sym, "", specific_land, ts[1], "Yes")
+                        st.session_state[bkey].append({"name":new_name.strip(),"type":ftype,"botanical":man_bot.strip(),"symptom":man_sym,"remediates":man_rem.strip(),"importance":""})
+                        st.session_state[nkey] += 1
+                        st.success(f"Added '{new_name}' to {slot} (manual)."); st.rerun()
+                    else:
+                        st.warning("Could not save. Try again.")
+            return  # skip AI path entirely in manual mode
+
         col_a, col_b = st.columns(2)
         with col_a: analyze = st.button("Analyze", key=f"analyze_{slot}_{non}")
         with col_b: clear = st.button("Clear", key=f"clear_{slot}_{non}")
@@ -517,7 +551,7 @@ if page=="📝 Food Log":
             else:
                 st.warning("AI couldn't analyze this item.")
                 if err: st.caption(f"Reason: {err}")
-                st.caption("Tip: if every food fails, it's usually the Gemini API key or quota — check Admin or your secrets.")
+                st.info("👉 Tick **✍️ Manual entry (no AI)** above to type the details yourself and save.")
 
         if akey in st.session_state and st.session_state[akey]:
             res = st.session_state[akey]
@@ -625,6 +659,8 @@ if page=="📝 Food Log":
                     '}'
                 )
                 day = ai(day_prompt)
+            if not day:
+                st.info("⚠️ AI insights unavailable right now (likely quota) — your log will still be saved below.")
             if day:
                 for slot in ["morning","afternoon","evening"]:
                     if day.get(slot) and day[slot].get('insight'):

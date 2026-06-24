@@ -466,7 +466,7 @@ if page=="📝 Food Log":
                     st.warning(f"'{choice}' is already in this meal.")
                 else:
                     n,was,isnew = save_discovered_food(choice,ftype,current_user,"","",specific_land,ts[1])
-                    st.session_state[bkey].append({"name":choice,"type":ftype,"botanical":det[2] if det else "","symptom":""})
+                    st.session_state[bkey].append({"name":choice,"type":ftype,"botanical":det[2] if det else "","symptom":"","remediates":det[4] if det else "","importance":det[3] if det else ""})
                     if akey in st.session_state: del st.session_state[akey]
                     st.session_state[nkey] += 1  # fresh pickers next run
                     st.success(f"Added '{choice}' to {slot}."); st.rerun()
@@ -530,7 +530,7 @@ if page=="📝 Food Log":
                     if n is not None:
                         if symptom:
                             save_remedy(ver_name.strip(), ver_bot.strip(), symptom, res.get('symptom_dosha',''), specific_land, ts[1], "Yes")
-                        st.session_state[bkey].append({"name":ver_name.strip(),"type":ftype,"botanical":ver_bot.strip(),"symptom":symptom})
+                        st.session_state[bkey].append({"name":ver_name.strip(),"type":ftype,"botanical":ver_bot.strip(),"symptom":symptom,"remediates":res.get('remediates',''),"importance":res.get('plant_importance','')})
                         if akey in st.session_state: del st.session_state[akey]
                         st.session_state[nkey] += 1  # fresh pickers next run
                         st.success(f"Added '{ver_name}' to {slot}."); st.rerun()
@@ -544,8 +544,8 @@ if page=="📝 Food Log":
     meal_item_widget("evening","🌙",ve)
     st.markdown("---")
 
-    st.subheader("Save Today's Daily Log")
-    st.caption("Records ratings, energy, digestion, mood for your History & scores.")
+    st.subheader("🔬 Analyze My Day & Save")
+    st.caption("Builds your full meal analysis report and saves it to History.")
     with st.form("daily_feedback"):
         c1,c2,c3=st.columns(3)
         with c1: mr=st.slider("Morning rating",1,5,3,key="mr"); mh=st.selectbox("Morning helped?",["Yes","Partially","No","Not for health"],key="mh")
@@ -557,34 +557,99 @@ if page=="📝 Food Log":
         with c2: fd=st.selectbox("Digestion",["Good","Normal","Sluggish","Weak"],key="fd")
         with c3: fsl=st.selectbox("Sleep",["Good","Normal","Disturbed","Poor"],key="fsl")
         with c4: fmo=st.selectbox("Mood",["Happy","Normal","Tired","Irritable"],key="fmo")
-        save_day=st.form_submit_button("Save Today's Log",type="primary")
+        save_day=st.form_submit_button("🔬 Analyze My Day & Save",type="primary")
 
     if save_day:
-        mn=st.session_state.get('note_morning','');an=st.session_state.get('note_afternoon','');en=st.session_state.get('note_evening','')
+        bm=st.session_state.get('basket_morning',[]);ba=st.session_state.get('basket_afternoon',[]);be=st.session_state.get('basket_evening',[])
+        note_m=st.session_state.get('note_morning','');note_a=st.session_state.get('note_afternoon','');note_e=st.session_state.get('note_evening','')
+        # Build meal notes from baskets (item names) + any free-text note
+        def basket_summary(basket,note):
+            names=", ".join(it['name'] for it in basket)
+            if names and note: return f"{names} ({note})"
+            return names or note
+        mn=basket_summary(bm,note_m);an=basket_summary(ba,note_a);en=basket_summary(be,note_e)
+
+        # Per-meal AI insight (consolidated report)
+        meal_insights={}
+        for slot,basket in [("morning",bm),("afternoon",ba),("evening",be)]:
+            if basket:
+                items_txt="; ".join(f"{it['name']} ({it['type']}{', '+it['botanical'] if it.get('botanical') else ''})" for it in basket)
+                with st.spinner(f"Analyzing {slot} meal..."):
+                    ins=ai('Tamil Siddha nutrition expert. Meal items: '+items_txt+'. Location: '+str(specific_land)+' land, season '+str(ts[1])+'. '
+                           'Give a short combined insight. Return ONLY JSON: {"insight":"1-2 sentence Siddha insight on this meal combination","balance":"which doshas it balances","tip":"one improvement tip"}')
+                    meal_insights[slot]=ins
+
+        # Junk analysis
         junk_result=None;junk_count=0
         if jn.strip():
             with st.spinner("Junk analysis..."):
                 jprompt='Nutritionist. Junk: "'+jn+'". Return JSON: {"items":[{"name":"X","dosha_impact":"X","healing_interference":"X","consumed_by":"Adult/Kids/Both","tamil_alternative":"X","alternative_benefit":"X"}],"total_junk_count":3,"overall_message":"X"}'
                 junk_result=ai(jprompt)
                 if junk_result: junk_count=junk_result.get('total_junk_count',0)
-        mc=sum(1 for t in [mn,an,en] if t and t.strip());hc=sum(1 for h in [mh,ah,eh] if h=="Yes")
+
+        mc=sum(1 for b in [bm,ba,be] if b);hc=sum(1 for h in [mh,ah,eh] if h=="Yes")
         hs=min(10,max(1,(mc*2)+(hc*2)-(junk_count)+(fe//3)))
+
         try:
             conn=db();cur=conn.cursor()
             cur.execute("INSERT INTO feedback_detailed (user_id,feedback_date,pincode,area_name,specific_land,tamil_season,weather_condition,morning_notes,morning_rating,morning_helped,afternoon_notes,afternoon_rating,afternoon_helped,evening_notes,evening_rating,evening_helped,junk_notes,junk_parsed,junk_count,energy_level,digestion,sleep_quality,mood,daily_health_score) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                 (current_user,date.today(),typed_pin,f"{pin_area}, {pin_district}",specific_land,ts[1],f"{w['temp']}C {w['desc']}",mn,mr,mh,an,ar,ah,en,er,eh,jn,json.dumps(junk_result),junk_count,fe,fd,fsl,fmo,hs))
-            conn.commit();cur.close();conn.close();st.success(f"Daily log saved! Score: {hs}/10")
+            conn.commit();cur.close();conn.close()
+            saved_ok=True
+        except Exception as e:
+            saved_ok=False; st.warning(f"Save: {e}")
+
+        # ===== CONSOLIDATED REPORT =====
+        st.markdown("---")
+        st.title("🤖 Your Day's Analysis")
+        report_voice=""
+        for slot,icon,basket,helped in [("morning","☀️",bm,mh),("afternoon","🌞",ba,ah),("evening","🌙",be,eh)]:
+            if not basket: continue
+            st.markdown(f"### {icon} {slot.title()}")
+            for it in basket:
+                tic={"Dish":"🍽️","Vegetable":"🥬","Leaf/Green":"🌿","Herb":"🌱","Grain":"🌾","Spice":"🌶️"}.get(it['type'],"🍽️")
+                line=f"**{tic} {it['name']}**"
+                if it.get('botanical'): line+=f"  ·  *{it['botanical']}*"
+                st.markdown(line)
+                if it.get('remediates'): st.success(f"💊 Remediates: {it['remediates']}")
+                if it.get('importance'): st.caption(f"⭐ {it['importance']}")
+                if it.get('symptom'): st.write(f"🤒 Taken for: {it['symptom']}")
+                report_voice+=f"{it['name']}. "
+            ins=meal_insights.get(slot)
+            if ins:
+                if ins.get('insight'): st.info(f"💡 {ins['insight']}")
+                if ins.get('balance'): st.caption(f"⚖️ Balances: {ins['balance']}")
+                if ins.get('tip'): st.write(f"👉 Tip: {ins['tip']}")
+                report_voice+=ins.get('insight','')+" "
+            eff={"Yes":"✅","Partially":"⚠️","No":"❌"}.get(helped,"ℹ️")
+            st.caption(f"{eff} Helped: {helped}")
+            st.markdown("---")
+
+        if junk_result and junk_result.get('items'):
+            st.markdown("### 🍟 Junk Impact")
+            for item in junk_result['items']:
+                st.warning(f"⚠️ {item.get('name','')} — {item.get('dosha_impact','')}")
+                if item.get('healing_interference'): st.caption(f"🔄 {item['healing_interference']}")
+                st.success(f"🌿 Try instead: {item.get('tamil_alternative','')} → {item.get('alternative_benefit','')}")
+            if junk_result.get('overall_message'): st.info(junk_result['overall_message'])
+            st.markdown("---")
+
+        st.subheader("📊 Today's Score")
+        c1,c2,c3=st.columns(3)
+        c1.metric("🏥 Score",f"{hs}/10");c2.metric("🟢 Meals",f"{mc}/3");c3.metric("🔴 Junk",junk_count)
+        if hs>=8: st.success("🌟 Excellent day! Your body thanks you!")
+        elif hs>=5: st.info("👍 Good! Small improvements make big changes.")
+        else: st.warning("⚠️ Aim for more traditional food tomorrow.")
+
+        if report_voice.strip():
+            audio=speak(report_voice,'en')
+            if audio: st.audio(audio,format='audio/mp3')
+
+        if saved_ok:
+            st.success(f"✅ Saved to {current_user}'s History!")
             for k in ['voice_morning','voice_afternoon','voice_evening','voice_junk','basket_morning','basket_afternoon','basket_evening']:
                 if k in st.session_state: del st.session_state[k]
-        except Exception as e: st.warning(f"Save: {e}")
-        if junk_result and junk_result.get('items'):
-            st.markdown("#### Junk Impact")
-            for item in junk_result['items']:
-                st.warning(f"{item.get('name','')} - {item.get('dosha_impact','')}")
-                st.success(f"Try instead: {item.get('tamil_alternative','')} -> {item.get('alternative_benefit','')}")
-            if junk_result.get('overall_message'): st.info(junk_result['overall_message'])
-        c1,c2,c3=st.columns(3)
-        c1.metric("Score",f"{hs}/10");c2.metric("Meals",f"{mc}/3");c3.metric("Junk",junk_count)
+
 
 
 # ==================== PAGE 2: FOOD HISTORY ====================

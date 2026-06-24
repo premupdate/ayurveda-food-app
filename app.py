@@ -605,23 +605,34 @@ if page=="📝 Food Log":
             return names or note
         mn=basket_summary(bm,note_m);an=basket_summary(ba,note_a);en=basket_summary(be,note_e)
 
-        # Per-meal AI insight (consolidated report)
-        meal_insights={}
-        for slot,basket in [("morning",bm),("afternoon",ba),("evening",be)]:
-            if basket:
-                items_txt="; ".join(f"{it['name']} ({it['type']}{', '+it['botanical'] if it.get('botanical') else ''})" for it in basket)
-                with st.spinner(f"Analyzing {slot} meal..."):
-                    ins=ai('Tamil Siddha nutrition expert. Meal items: '+items_txt+'. Location: '+str(specific_land)+' land, season '+str(ts[1])+'. '
-                           'Give a short combined insight. Return ONLY JSON: {"insight":"1-2 sentence Siddha insight on this meal combination","balance":"which doshas it balances","tip":"one improvement tip"}')
-                    meal_insights[slot]=ins
-
-        # Junk analysis
-        junk_result=None;junk_count=0
-        if jn.strip():
-            with st.spinner("Junk analysis..."):
-                jprompt='Nutritionist. Junk: "'+jn+'". Return JSON: {"items":[{"name":"X","dosha_impact":"X","healing_interference":"X","consumed_by":"Adult/Kids/Both","tamil_alternative":"X","alternative_benefit":"X"}],"total_junk_count":3,"overall_message":"X"}'
-                junk_result=ai(jprompt)
-                if junk_result: junk_count=junk_result.get('total_junk_count',0)
+        # ===== SINGLE AI CALL for the whole day (meals insight + junk) =====
+        meal_insights={}; junk_result=None; junk_count=0
+        def items_txt(basket):
+            return "; ".join(f"{it['name']} ({it['type']}{', '+it['botanical'] if it.get('botanical') else ''})" for it in basket)
+        if bm or ba or be or jn.strip():
+            with st.spinner("Analyzing your day..."):
+                day_prompt = (
+                    'Tamil Siddha nutrition expert. Location: ' + str(specific_land) + ' land, season ' + str(ts[1]) + '. '
+                    'Morning meal: ' + (items_txt(bm) or 'none') + '. '
+                    'Afternoon meal: ' + (items_txt(ba) or 'none') + '. '
+                    'Evening meal: ' + (items_txt(be) or 'none') + '. '
+                    'Junk eaten: ' + (jn.strip() or 'none') + '. '
+                    'Return ONLY JSON: {'
+                    '"morning":{"insight":"1-2 sentence Siddha insight or empty","balance":"doshas balanced","tip":"one tip"},'
+                    '"afternoon":{"insight":"...","balance":"...","tip":"..."},'
+                    '"evening":{"insight":"...","balance":"...","tip":"..."},'
+                    '"junk":{"items":[{"name":"X","dosha_impact":"X","healing_interference":"X","tamil_alternative":"X","alternative_benefit":"X"}],"total_junk_count":0,"overall_message":"X"}'
+                    '}'
+                )
+                day = ai(day_prompt)
+            if day:
+                for slot in ["morning","afternoon","evening"]:
+                    if day.get(slot) and day[slot].get('insight'):
+                        meal_insights[slot]=day[slot]
+                jr = day.get('junk')
+                if jr and jn.strip():
+                    junk_result = jr
+                    junk_count = jr.get('total_junk_count',0) or (len(jr.get('items',[])) if jr.get('items') else 0)
 
         mc=sum(1 for b in [bm,ba,be] if b);hc=sum(1 for h in [mh,ah,eh] if h=="Yes")
         hs=min(10,max(1,(mc*2)+(hc*2)-(junk_count)+(fe//3)))

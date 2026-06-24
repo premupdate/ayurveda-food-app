@@ -481,14 +481,17 @@ if page=="📝 Food Log":
         if clear and akey in st.session_state: del st.session_state[akey]
 
         if analyze and new_name.strip():
-            with st.spinner("Analyzing & identifying botanical name..."):
+            with st.spinner("Analyzing dish & identifying component plants..."):
                 prompt = (
                     'Tamil Siddha food & botany expert. The user ate: "' + new_name.strip() +
-                    '" (type: ' + ftype + '). Identify the MAIN plant/ingredient and give scientific details. '
-                    'Return ONLY JSON: {"clean_name":"Cleaned food name","key_plant_tamil":"Tamil/common name",'
-                    '"botanical_name":"Latin botanical name","plant_importance":"Why this plant matters in Siddha/Ayurveda (1-2 sentences)",'
-                    '"remediates":"Conditions/symptoms it helps (comma separated)","vegetables":[],"leaves_greens":[],'
-                    '"herbs":[],"grains":[],"spices":[],"symptom_dosha":"Vata/Pitta/Kapha or empty"}'
+                    '" (type: ' + ftype + '). KEEP the full dish name intact. '
+                    'Break it into its component plants/ingredients; for EACH component give its own botanical name. '
+                    'A dish like "Musumusukkai Kadaisal with Murungakkai Poriyal" has components Musumusukkai (leaf) and Murungakkai (vegetable). '
+                    'Return ONLY JSON: {"dish_name":"full dish name kept intact",'
+                    '"components":[{"name":"component plant common/Tamil name","type":"Vegetable/Leaf-Green/Herb/Grain/Spice","botanical_name":"Latin name or empty if unsure","remediates":"conditions it helps"}],'
+                    '"combined_remediates":"overall conditions this whole dish helps (comma separated)",'
+                    '"importance":"why this dish matters in Siddha/Ayurveda (1-2 sentences)",'
+                    '"symptom_dosha":"Vata/Pitta/Kapha or empty"}'
                 )
                 res, err = ai(prompt, debug=True)
             if res: st.session_state[akey] = res
@@ -500,37 +503,51 @@ if page=="📝 Food Log":
         if akey in st.session_state and st.session_state[akey]:
             res = st.session_state[akey]
             st.markdown("#### Verify AI Analysis")
-            ver_name = st.text_input("Food name", res.get('clean_name', new_name), key=f"vername_{slot}_{non}")
-            is_dish = (ftype == "Dish")
-            if is_dish:
-                ver_bot = ""
-                st.caption("ℹ️ Dishes don't get a botanical name (it's a mix of ingredients).")
+            st.caption("The full dish is saved as one item. Each component plant below gets its own botanical name — edit any that's blank or wrong.")
+            ver_name = st.text_input("Dish name (saved & returned whole)", res.get('dish_name', res.get('clean_name', new_name)), key=f"vername_{slot}_{non}")
+
+            comps = res.get('components', [])
+            edited_comps = []
+            if comps:
+                st.markdown("**Component plants:**")
+                for ci, comp in enumerate(comps):
+                    cc1, cc2 = st.columns([1,1])
+                    with cc1:
+                        cname = st.text_input(f"Plant {ci+1}", comp.get('name',''), key=f"cname_{slot}_{non}_{ci}")
+                    with cc2:
+                        cbot = st.text_input(f"Botanical {ci+1}", comp.get('botanical_name',''), key=f"cbot_{slot}_{non}_{ci}",
+                                             placeholder="type if blank")
+                    if comp.get('remediates'): st.caption(f"   💊 {comp['name']}: {comp['remediates']}")
+                    edited_comps.append({"name":cname.strip(),"type":comp.get('type',''),"botanical":cbot.strip(),"remediates":comp.get('remediates','')})
             else:
-                ver_bot = st.text_input("Botanical name", res.get('botanical_name',''), key=f"verbot_{slot}_{non}")
-            st.write(f"Key plant: {res.get('key_plant_tamil','')}")
-            if res.get('plant_importance'): st.write(f"Importance: {res['plant_importance']}")
-            if res.get('remediates'): st.success(f"Remediates: {res['remediates']}")
-            extras=[]
-            for k,lbl in [("vegetables","Veg"),("leaves_greens","Leaves"),("herbs","Herbs"),("grains","Grains"),("spices","Spices")]:
-                if res.get(k): extras.append(f"{lbl}: {', '.join(res[k])}")
-            if extras: st.caption(" | ".join(extras))
+                st.info("No separate components detected — saved as a single dish.")
+
+            combined_rem = res.get('combined_remediates','') or res.get('remediates','')
+            if combined_rem: st.success(f"💊 This dish remediates: {combined_rem}")
+            if res.get('importance'): st.caption(f"⭐ {res['importance']}")
+
             symptom_guess = ""
             if note and (" for " in note.lower()):
                 symptom_guess = note.lower().split(" for ",1)[1].strip()
             symptom = st.text_input("Symptom treated (optional)", symptom_guess, key=f"versym_{slot}_{non}")
+
             if st.button("✅ Looks correct - Add to meal", key=f"confirm_{slot}_{non}", type="primary"):
                 if in_basket(ver_name):
                     st.warning(f"'{ver_name}' is already in this meal.")
                 else:
+                    # Build a botanical summary from components for storage inside the dish record
+                    comp_bot = "; ".join(f"{c['name']}={c['botanical']}" for c in edited_comps if c['botanical']) if edited_comps else ""
+                    importance_full = res.get('importance','')
+                    if comp_bot: importance_full = (importance_full + " | Components: " + comp_bot).strip(" |")
                     n,was,isnew = save_discovered_food(
                         ver_name.strip(), ftype, current_user, symptom,
                         res.get('symptom_dosha',''), specific_land, ts[1],
-                        botanical=ver_bot.strip(), importance=res.get('plant_importance',''),
-                        remediates=res.get('remediates',''))
+                        botanical=comp_bot, importance=importance_full,
+                        remediates=combined_rem)
                     if n is not None:
                         if symptom:
-                            save_remedy(ver_name.strip(), ver_bot.strip(), symptom, res.get('symptom_dosha',''), specific_land, ts[1], "Yes")
-                        st.session_state[bkey].append({"name":ver_name.strip(),"type":ftype,"botanical":ver_bot.strip(),"symptom":symptom,"remediates":res.get('remediates',''),"importance":res.get('plant_importance','')})
+                            save_remedy(ver_name.strip(), comp_bot, symptom, res.get('symptom_dosha',''), specific_land, ts[1], "Yes")
+                        st.session_state[bkey].append({"name":ver_name.strip(),"type":ftype,"botanical":comp_bot,"symptom":symptom,"remediates":combined_rem,"importance":importance_full,"components":edited_comps})
                         if akey in st.session_state: del st.session_state[akey]
                         st.session_state[nkey] += 1  # fresh pickers next run
                         st.success(f"Added '{ver_name}' to {slot}."); st.rerun()

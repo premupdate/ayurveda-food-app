@@ -20,7 +20,7 @@ if hasattr(st, 'secrets'):
 
 st.set_page_config(page_title="Tamil Ayurvedic Platform", layout="wide")
 genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
-gm = genai.GenerativeModel('gemini-2.5-flash')
+gm = genai.GenerativeModel('gemini-2.0-flash')
 
 # ==================== CORE FUNCTIONS ====================
 def db():
@@ -63,7 +63,23 @@ def ai(prompt, debug=False):
         except Exception as e2:
             last_err = f"Retry failed: {e2}"
     except Exception as e:
-        last_err = f"{type(e).__name__}: {e}"
+        msg = str(e)
+        # On rate-limit (429), wait briefly and retry once
+        if "429" in msg or "quota" in msg.lower() or "ResourceExhausted" in msg or "rate" in msg.lower():
+            try:
+                import time as _t, re as _re
+                m = _re.search(r"retry.*?(\d+)\s*s", msg, _re.IGNORECASE)
+                wait = min(int(m.group(1)), 15) if m else 6
+                _t.sleep(wait)
+                r3 = gm.generate_content(prompt)
+                res3 = extract_json(getattr(r3, "text", "") or "")
+                if res3 is not None:
+                    return (res3, "") if debug else res3
+                last_err = "Rate limited; retry returned no JSON"
+            except Exception as e3:
+                last_err = f"Rate limited (429). {type(e3).__name__}: {e3}"
+        else:
+            last_err = f"{type(e).__name__}: {e}"
     return (None, last_err) if debug else None
 
 def speak(text, lang='en'):
